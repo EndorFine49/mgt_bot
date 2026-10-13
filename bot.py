@@ -1,6 +1,7 @@
 import os
 import logging
 import re
+import asyncio
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import Command
@@ -54,28 +55,36 @@ def get_team_keyboard():
         keyboard.append(row)
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# --- СОСТОЯНИЯ ---
+# --- СОСТОЯНИЯ (FSM) ---
 class Registration(StatesGroup):
     waiting_for_first_name = State()
     waiting_for_last_name = State()
 
 class Survey(StatesGroup):
     waiting_for_team = State()
-    waiting_for_experience = State()
+    waiting_for_shifts = State()
     waiting_for_birthday = State()
     waiting_for_study_group = State()
     waiting_for_hobbies = State()
-    
-    # Состояния для редактирования
-    editing_experience = State()
+    editing_shifts = State()
     editing_birthday = State()
     editing_study_group = State()
     editing_hobbies = State()
+
+class Broadcast(StatesGroup):
+    waiting_for_text = State()
+    waiting_for_button_choice = State()
+    waiting_for_button_text = State()
+    waiting_for_button_url = State()
 
 # --- БАЗА ДАННЫХ ---
 def get_user(tg_id: int):
     response = supabase.table("users").select("*").eq("tg_id", tg_id).execute()
     return response.data[0] if response.data else None
+
+def get_all_users():
+    response = supabase.table("users").select("tg_id").execute()
+    return response.data if response.data else []
 
 def add_user(tg_id: int, first_name: str, last_name: str):
     response = supabase.table("users").insert({
@@ -93,6 +102,50 @@ def update_balance(tg_id: int, amount: int):
         supabase.table("users").update({"balance": new_balance}).eq("tg_id", tg_id).execute()
         return new_balance
     return None
+
+# --- ФУНКЦИЯ РАССЫЛКИ ---
+async def send_broadcast_message(chat_id: int, text: str, button_text: str = None, button_url: str = None):
+    """Отправляет одно сообщение с учетом кнопок."""
+    keyboard = None
+    if button_text and button_url:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=button_text, url=button_url)
+        ]])
+    
+    await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="Markdown")
+
+async def process_broadcast(chat_id: int, state: FSMContext, is_test: bool = False):
+    """Логика массовой отправки."""
+    data = await state.get_data()
+    text = data.get("text", "")
+    btn_text = data.get("button_text")
+    btn_url = data.get("button_url")
+    
+    await state.clear()
+    
+    if is_test:
+        await bot.send_message(chat_id, f"🧪 *ТЕСТОВАЯ РАССЫЛКА*\n\n{text}", parse_mode="Markdown", 
+                               reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=btn_text, url=btn_url)]]) if btn_text else None)
+        await bot.send_message(chat_id, "✅ Тестовое сообщение отправлено!")
+        return
+
+    await bot.send_message(chat_id, "🚀 Запускаю рассылку... Это может занять некоторое время.")
+    
+    users = get_all_users()
+    success_count = 0
+    error_count = 0
+    
+    for user in users:
+        try:
+            await send_broadcast_message(user['tg_id'], text, btn_text, btn_url)
+            success_count += 1
+            await asyncio.sleep(0.05) # Задержка 50мс для безопасности
+        except Exception as e:
+            error_count += 1
+            logger.error(f"Ошибка отправки пользователю {user['tg_id']}: {e}")
+            
+    report = f"✅ Рассылка завершена!\n\n📊 Статистика:\n• Доставлено: {success_count}\n• Ошибок: {error_count}\n• Всего пользователей: {len(users)}"
+    await bot.send_message(chat_id, report)
 
 # --- ОБРАБОТЧИКИ: ОСНОВНЫЕ ---
 
@@ -132,7 +185,6 @@ async def handle_balance(message: Message):
         await message.answer("Сначала зарегистрируйся через /start", reply_markup=main_menu_keyboard)
 
 # --- ОБРАБОТЧИКИ: АНКЕТА ---
-
 @dp.message(F.text == "📋 Посмотреть анкету")
 async def handle_survey_menu(message: Message):
     tg_id = message.from_user.id
@@ -142,23 +194,21 @@ async def handle_survey_menu(message: Message):
         return
 
     if not user.get("survey_completed"):
-        # Анкета не заполнена
         kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="📝 Заполнить анкету (+5 вайбов)", callback_data="start_survey")
+            InlineKeyboardButton(text=" Заполнить анкету (+5 вайбов)", callback_data="start_survey")
         ]])
-        await message.answer("Привет! Ты ещё не заполнил анкету вожатого.\nЭто займет пару минут, а взамен ты получишь **5 вайбов** на баланс! 🎁", reply_markup=kb)
+        await message.answer("Привет! Ты ещё не заполнил анкету вожатого.\nЭто займет пару минут, а взамен ты получишь **5 вайбов** на баланс! ", reply_markup=kb)
     else:
-        # Анкета заполнена, показываем данные и кнопки редактирования
         text = (f"📋 **Твоя анкета:**\n\n"
                 f"👥 Команда: {user['team'] or 'Не указано'}\n"
-                f"🔢 Смен отработано: {user['experience'] or 'Не указано'}\n"
+                f" Опыт (смены): {user['experience'] or 'Не указано'}\n"
                 f"🎂 Дата рождения: {user['birthday'] or 'Не указано'}\n"
                 f"📚 Группа обучения: {user['study_group'] or 'Не указано'}\n"
                 f"🎨 Хобби/таланты: {user['hobbies'] or 'Не указано'}\n\n"
                 f"Хочешь что-то изменить?")
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ Смены", callback_data="edit_experience"), InlineKeyboardButton(text="✏️ ДР", callback_data="edit_birthday")],
+            [InlineKeyboardButton(text="✏️ Опыт", callback_data="edit_shifts"), InlineKeyboardButton(text="✏️ ДР", callback_data="edit_birthday")],
             [InlineKeyboardButton(text="✏️ Группа", callback_data="edit_study_group"), InlineKeyboardButton(text="✏️ Хобби", callback_data="edit_hobbies")]
         ])
         await message.answer(text, reply_markup=kb, parse_mode="Markdown")
@@ -175,16 +225,15 @@ async def process_team(callback: CallbackQuery, state: FSMContext):
     team = callback.data.replace("team_", "")
     await state.update_data(team=team)
     await callback.message.edit_text(f"Выбрано: {team} ✅\n\nСколько смен ты отработал всего (включая другие лагеря)?\nНапиши число, например: 3")
-    await state.set_state(Survey.waiting_for_experience)
+    await state.set_state(Survey.waiting_for_shifts)
     await callback.answer()
 
-@dp.message(Survey.waiting_for_experience)
-async def process_experience(message: Message, state: FSMContext):
+@dp.message(Survey.waiting_for_shifts)
+async def process_shifts(message: Message, state: FSMContext):
     if not message.text.isdigit() or int(message.text) < 0:
         await message.answer("Пожалуйста, введи корректное число смен (например: 3)")
         return
-    
-    await state.update_data(experience=int(message.text))
+    await state.update_data(experience=int(message.text)) # Используем experience
     await message.answer("Отлично! Теперь укажи дату рождения в формате ДД.ММ.ГГГГ\nНапример: 15.06.1995")
     await state.set_state(Survey.waiting_for_birthday)
 
@@ -193,7 +242,6 @@ async def process_birthday(message: Message, state: FSMContext):
     if not re.match(r"^\d{2}\.\d{2}\.\d{4}$", message.text):
         await message.answer("Неверный формат. Используй ДД.ММ.ГГГГ (например: 15.06.1995)")
         return
-    
     await state.update_data(birthday=message.text)
     await message.answer("Супер! Укажи свою группу обучения (или напиши 'Не помню', если учился давно):")
     await state.set_state(Survey.waiting_for_study_group)
@@ -208,66 +256,40 @@ async def process_study_group(message: Message, state: FSMContext):
 async def process_hobbies(message: Message, state: FSMContext):
     tg_id = message.from_user.id
     data = await state.get_data()
-    
-    # Сохраняем всё в базу
     update_user(tg_id, {
-        "team": data.get("team"),
-        "experience": data.get("experience"),
-        "birthday": data.get("birthday"),
-        "study_group": data.get("study_group"),
-        "hobbies": message.text,
-        "survey_completed": True
+        "team": data.get("team"), "experience": data.get("experience"), "birthday": data.get("birthday"),
+        "study_group": data.get("study_group"), "hobbies": message.text, "survey_completed": True
     })
-    
-    # Начисляем 5 вайбов, если это первое заполнение
     user = get_user(tg_id)
     new_balance = update_balance(tg_id, 5)
-    
     await state.clear()
     await message.answer(
         f"🎉 Анкета успешно заполнена! Спасибо!\n"
         f"Тебе начислено **5 вайбов** за активность.\n"
         f"Твой текущий баланс: {new_balance} {vibes_word(new_balance)}",
-        reply_markup=main_menu_keyboard,
-        parse_mode="Markdown"
+        reply_markup=main_menu_keyboard, parse_mode="Markdown"
     )
 
-# --- РЕДАКТИРОВАНИЕ АНКЕТЫ ---
-
+# Редактирование анкеты
 @dp.callback_query(F.data.startswith("edit_"))
 async def start_edit(callback: CallbackQuery, state: FSMContext):
     field = callback.data.replace("edit_", "")
-    state_map = {
-        "experience": Survey.editing_experience,
-        "birthday": Survey.editing_birthday,
-        "study_group": Survey.editing_study_group,
-        "hobbies": Survey.editing_hobbies
-    }
-    prompts = {
-        "experience": "Введи новое количество отработанных смен:",
-        "birthday": "Введи новую дату рождения (ДД.ММ.ГГГГ):",
-        "study_group": "Введи новую группу обучения:",
-        "hobbies": "Расскажи о новых хобби или талантах:"
-    }
-    
+    state_map = {"shifts": Survey.editing_shifts, "birthday": Survey.editing_birthday, "study_group": Survey.editing_study_group, "hobbies": Survey.editing_hobbies}
+    prompts = {"shifts": "Введи новое количество отработанных смен:", "birthday": "Введи новую дату рождения (ДД.ММ.ГГГГ):", "study_group": "Введи новую группу обучения:", "hobbies": "Расскажи о новых хобби или талантах:"}
     await state.set_state(state_map[field])
     await callback.message.edit_text(prompts[field])
     await callback.answer()
 
-@dp.message(Survey.editing_experience)
-async def save_edit_experience(message: Message, state: FSMContext):
-    if not message.text.isdigit() or int(message.text) < 0:
-        await message.answer("Введи корректное число.")
-        return
+@dp.message(Survey.editing_shifts)
+async def save_edit_shifts(message: Message, state: FSMContext):
+    if not message.text.isdigit() or int(message.text) < 0: return await message.answer("Введи корректное число.")
     update_user(message.from_user.id, {"experience": int(message.text)})
     await state.clear()
-    await message.answer("✅ Количество смен обновлено!", reply_markup=main_menu_keyboard)
+    await message.answer("✅ Опыт обновлен!", reply_markup=main_menu_keyboard)
 
 @dp.message(Survey.editing_birthday)
 async def save_edit_birthday(message: Message, state: FSMContext):
-    if not re.match(r"^\d{2}\.\d{2}\.\d{4}$", message.text):
-        await message.answer("Неверный формат. Используй ДД.ММ.ГГГГ.")
-        return
+    if not re.match(r"^\d{2}\.\d{2}\.\d{4}$", message.text): return await message.answer("Неверный формат (ДД.ММ.ГГГГ).")
     update_user(message.from_user.id, {"birthday": message.text})
     await state.clear()
     await message.answer("✅ Дата рождения обновлена!", reply_markup=main_menu_keyboard)
@@ -284,11 +306,72 @@ async def save_edit_hobbies(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ Хобби обновлены!", reply_markup=main_menu_keyboard)
 
+# --- ОБРАБОТЧИКИ: РАССЫЛКА (АДМИНКА) ---
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.answer("У тебя нет прав администратора.")
+    await message.answer(" *Режим рассылки*\n\nПришли текст сообщения, который нужно разослать всем пользователям.\n\n_Поддерживается Markdown: *жирный*, _курсив_, `код`_", parse_mode="Markdown")
+    await state.set_state(Broadcast.waiting_for_text)
+
+@dp.message(Command("test_broadcast"))
+async def cmd_test_broadcast(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.answer("У тебя нет прав администратора.")
+    await message.answer("🧪 *Тестовая рассылка*\n\nПришли текст сообщения. Оно придет только тебе.", parse_mode="Markdown")
+    await state.update_data(is_test=True)
+    await state.set_state(Broadcast.waiting_for_text)
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state:
+        await state.clear()
+        await message.answer("Действие отменено.", reply_markup=main_menu_keyboard)
+    else:
+        await message.answer("Нет активных действий для отмены.", reply_markup=main_menu_keyboard)
+
+@dp.message(Broadcast.waiting_for_text)
+async def process_broadcast_text(message: Message, state: FSMContext):
+    await state.update_data(text=message.text)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Да, добавить", callback_data="broadcast_btn_yes"), InlineKeyboardButton(text="Нет, без кнопки", callback_data="broadcast_btn_no")]
+    ])
+    await message.answer("Добавить под сообщением Inline-кнопку (например, 'Перейти к анкете')?", reply_markup=kb)
+    await state.set_state(Broadcast.waiting_for_button_choice)
+
+@dp.callback_query(F.data.in_(["broadcast_btn_yes", "broadcast_btn_no"]))
+async def process_button_choice(callback: CallbackQuery, state: FSMContext):
+    if callback.data == "broadcast_btn_yes":
+        await callback.message.edit_text("Отлично! Напиши текст для кнопки (например: 'Открыть анкету'):")
+        await state.set_state(Broadcast.waiting_for_button_text)
+    else:
+        await callback.message.edit_text("Понял, запускаю рассылку без кнопки...")
+        is_test = (await state.get_data()).get("is_test", False)
+        await process_broadcast(callback.message.chat.id, state, is_test)
+    await callback.answer()
+
+@dp.message(Broadcast.waiting_for_button_text)
+async def process_button_text(message: Message, state: FSMContext):
+    await state.update_data(button_text=message.text)
+    await message.answer("Теперь пришли ссылку (URL), куда должна вести кнопка (например, https://t.me/your_bot):")
+    await state.set_state(Broadcast.waiting_for_button_url)
+
+@dp.message(Broadcast.waiting_for_button_url)
+async def process_button_url(message: Message, state: FSMContext):
+    if not message.text.startswith("http"):
+        return await message.answer("Ссылка должна начинаться с http:// или https://. Попробуй еще раз:")
+    
+    await state.update_data(button_url=message.text)
+    await message.answer("Принял! Запускаю рассылку с кнопкой...")
+    is_test = (await state.get_data()).get("is_test", False)
+    await process_broadcast(message.chat.id, state, is_test)
+
 # --- ОБЩИЙ FALLBACK ---
 @dp.message()
 async def catch_all_messages(message: Message, state: FSMContext):
     current_state = await state.get_state()
-    
     if current_state == Registration.waiting_for_first_name:
         await state.update_data(first_name=message.text)
         await message.answer("Отлично! А теперь фамилия?")
@@ -298,16 +381,10 @@ async def catch_all_messages(message: Message, state: FSMContext):
         data = await state.get_data()
         first_name = data.get("first_name", "Неизвестно")
         last_name = message.text
-        
         user = add_user(tg_id, first_name, last_name)
         if user:
             await state.clear()
-            await message.answer(
-                f"Приятно познакомиться, {first_name}! 🎉\n"
-                f"Ты получил 1 вайб на старт.\n"
-                f"Твой баланс: {user['balance']} {vibes_word(user['balance'])}",
-                reply_markup=main_menu_keyboard
-            )
+            await message.answer(f"Приятно познакомиться, {first_name}! 🎉\nТы получил 1 вайб на старт.\nТвой баланс: {user['balance']} {vibes_word(user['balance'])}", reply_markup=main_menu_keyboard)
     else:
         await message.answer("Я тебя не понимаю. Используй кнопки меню 👇", reply_markup=main_menu_keyboard)
 
