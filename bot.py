@@ -1,12 +1,12 @@
 import os
 import logging
+import re
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -26,9 +26,7 @@ dp = Dispatcher(storage=MemoryStorage())
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-
 def vibes_word(count):
-    """Склоняет слово 'вайб'."""
     count = abs(count) % 100
     n1 = count % 10
     if count > 10 and count < 20: return "вайбов"
@@ -45,10 +43,34 @@ main_menu_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Состояния
+TEAM_OPTIONS = ["Джем", "Драйв", "Сияй", "Начало", "Big Family", "Полис", "Крым Team", "Не состою в команде"]
+
+def get_team_keyboard():
+    keyboard = []
+    for i in range(0, len(TEAM_OPTIONS), 2):
+        row = [InlineKeyboardButton(text=TEAM_OPTIONS[i], callback_data=f"team_{TEAM_OPTIONS[i]}")]
+        if i + 1 < len(TEAM_OPTIONS):
+            row.append(InlineKeyboardButton(text=TEAM_OPTIONS[i+1], callback_data=f"team_{TEAM_OPTIONS[i+1]}"))
+        keyboard.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# --- СОСТОЯНИЯ ---
 class Registration(StatesGroup):
     waiting_for_first_name = State()
     waiting_for_last_name = State()
+
+class Survey(StatesGroup):
+    waiting_for_team = State()
+    waiting_for_shifts = State()
+    waiting_for_birthday = State()
+    waiting_for_study_group = State()
+    waiting_for_hobbies = State()
+    
+    # Состояния для редактирования
+    editing_shifts = State()
+    editing_birthday = State()
+    editing_study_group = State()
+    editing_hobbies = State()
 
 # --- БАЗА ДАННЫХ ---
 def get_user(tg_id: int):
@@ -57,9 +79,12 @@ def get_user(tg_id: int):
 
 def add_user(tg_id: int, first_name: str, last_name: str):
     response = supabase.table("users").insert({
-        "tg_id": tg_id, "first_name": first_name, "last_name": last_name, "balance": 1
+        "tg_id": tg_id, "first_name": first_name, "last_name": last_name, "balance": 1, "survey_completed": False
     }).execute()
     return response.data[0] if response.data else None
+
+def update_user(tg_id: int, data: dict):
+    supabase.table("users").update(data).eq("tg_id", tg_id).execute()
 
 def update_balance(tg_id: int, amount: int):
     user = get_user(tg_id)
@@ -69,12 +94,11 @@ def update_balance(tg_id: int, amount: int):
         return new_balance
     return None
 
-# --- ОБРАБОТЧИКИ (ВАЖНО: СПЕЦИФИЧНЫЕ СВЕРХУ, ОБЩИЕ СНИЗУ) ---
+# --- ОБРАБОТЧИКИ: ОСНОВНЫЕ ---
 
-# 1. Команда /start
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
-    logger.info(f"Команда /start от {message.from_user.id}")
+    await state.clear()
     tg_id = message.from_user.id
     user = get_user(tg_id)
     
@@ -88,7 +112,6 @@ async def cmd_start(message: Message, state: FSMContext):
         await state.set_state(Registration.waiting_for_first_name)
         await message.answer("Привет! Давай познакомимся. Как твое имя?")
 
-# 2. Обработчики кнопок меню
 @dp.message(F.text == "✨ Получить вайб")
 async def handle_claim_vibe(message: Message):
     tg_id = message.from_user.id
@@ -97,7 +120,7 @@ async def handle_claim_vibe(message: Message):
         new_balance = update_balance(tg_id, 1)
         await message.answer(f"Тебе +1 вайб! ✨\nТвой баланс: {new_balance} {vibes_word(new_balance)}")
     else:
-        await message.answer("Сначала зарегистрируйся через /start")
+        await message.answer("Сначала зарегистрируйся через /start", reply_markup=main_menu_keyboard)
 
 @dp.message(F.text == "💰 Баланс")
 async def handle_balance(message: Message):
@@ -106,24 +129,170 @@ async def handle_balance(message: Message):
     if user:
         await message.answer(f"Твой баланс: {user['balance']} {vibes_word(user['balance'])}")
     else:
-        await message.answer("Сначала зарегистрируйся через /start")
+        await message.answer("Сначала зарегистрируйся через /start", reply_markup=main_menu_keyboard)
+
+# --- ОБРАБОТЧИКИ: АНКЕТА ---
 
 @dp.message(F.text == "📋 Посмотреть анкету")
-async def handle_survey(message: Message):
-    await message.answer("Раздел 'Анкета' в разработке. Скоро здесь появится возможность заполнить данные о себе!", reply_markup=main_menu_keyboard)
+async def handle_survey_menu(message: Message):
+    tg_id = message.from_user.id
+    user = get_user(tg_id)
+    if not user:
+        await message.answer("Сначала зарегистрируйся через /start", reply_markup=main_menu_keyboard)
+        return
 
-# 3. Общий обработчик (Fallback) - в самом конце!
+    if not user.get("survey_completed"):
+        # Анкета не заполнена
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="📝 Заполнить анкету (+5 вайбов)", callback_data="start_survey")
+        ]])
+        await message.answer("Привет! Ты ещё не заполнил анкету вожатого.\nЭто займет пару минут, а взамен ты получишь **5 вайбов** на баланс! 🎁", reply_markup=kb)
+    else:
+        # Анкета заполнена, показываем данные и кнопки редактирования
+        text = (f"📋 **Твоя анкета:**\n\n"
+                f"👥 Команда: {user['team'] or 'Не указано'}\n"
+                f"🔢 Смен отработано: {user['shifts'] or 'Не указано'}\n"
+                f"🎂 Дата рождения: {user['birthday'] or 'Не указано'}\n"
+                f"📚 Группа обучения: {user['study_group'] or 'Не указано'}\n"
+                f"🎨 Хобби/таланты: {user['hobbies'] or 'Не указано'}\n\n"
+                f"Хочешь что-то изменить?")
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Смены", callback_data="edit_shifts"), InlineKeyboardButton(text="✏️ ДР", callback_data="edit_birthday")],
+            [InlineKeyboardButton(text="✏️ Группа", callback_data="edit_study_group"), InlineKeyboardButton(text="✏️ Хобби", callback_data="edit_hobbies")]
+        ])
+        await message.answer(text, reply_markup=kb, parse_mode="Markdown")
+
+@dp.callback_query(F.data == "start_survey")
+async def start_survey(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Отлично! В какой вожатской команде ты состоишь?")
+    await callback.message.answer("Выбери команду:", reply_markup=get_team_keyboard())
+    await state.set_state(Survey.waiting_for_team)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("team_"))
+async def process_team(callback: CallbackQuery, state: FSMContext):
+    team = callback.data.replace("team_", "")
+    await state.update_data(team=team)
+    await callback.message.edit_text(f"Выбрано: {team} ✅\n\nСколько смен ты отработал всего (включая другие лагеря)?\nНапиши число, например: 3")
+    await state.set_state(Survey.waiting_for_shifts)
+    await callback.answer()
+
+@dp.message(Survey.waiting_for_shifts)
+async def process_shifts(message: Message, state: FSMContext):
+    if not message.text.isdigit() or int(message.text) < 0:
+        await message.answer("Пожалуйста, введи корректное число смен (например: 3)")
+        return
+    
+    await state.update_data(shifts=int(message.text))
+    await message.answer("Отлично! Теперь укажи дату рождения в формате ДД.ММ.ГГГГ\nНапример: 15.06.1995")
+    await state.set_state(Survey.waiting_for_birthday)
+
+@dp.message(Survey.waiting_for_birthday)
+async def process_birthday(message: Message, state: FSMContext):
+    if not re.match(r"^\d{2}\.\d{2}\.\d{4}$", message.text):
+        await message.answer("Неверный формат. Используй ДД.ММ.ГГГГ (например: 15.06.1995)")
+        return
+    
+    await state.update_data(birthday=message.text)
+    await message.answer("Супер! Укажи свою группу обучения (или напиши 'Не помню', если учился давно):")
+    await state.set_state(Survey.waiting_for_study_group)
+
+@dp.message(Survey.waiting_for_study_group)
+async def process_study_group(message: Message, state: FSMContext):
+    await state.update_data(study_group=message.text)
+    await message.answer("Последний вопрос! Расскажи кратко о своих хобби, увлечениях или особых талантах:")
+    await state.set_state(Survey.waiting_for_hobbies)
+
+@dp.message(Survey.waiting_for_hobbies)
+async def process_hobbies(message: Message, state: FSMContext):
+    tg_id = message.from_user.id
+    data = await state.get_data()
+    
+    # Сохраняем всё в базу
+    update_user(tg_id, {
+        "team": data.get("team"),
+        "shifts": data.get("shifts"),
+        "birthday": data.get("birthday"),
+        "study_group": data.get("study_group"),
+        "hobbies": message.text,
+        "survey_completed": True
+    })
+    
+    # Начисляем 5 вайбов, если это первое заполнение
+    user = get_user(tg_id)
+    new_balance = update_balance(tg_id, 5)
+    
+    await state.clear()
+    await message.answer(
+        f"🎉 Анкета успешно заполнена! Спасибо!\n"
+        f"Тебе начислено **5 вайбов** за активность.\n"
+        f"Твой текущий баланс: {new_balance} {vibes_word(new_balance)}",
+        reply_markup=main_menu_keyboard,
+        parse_mode="Markdown"
+    )
+
+# --- РЕДАКТИРОВАНИЕ АНКЕТЫ ---
+
+@dp.callback_query(F.data.startswith("edit_"))
+async def start_edit(callback: CallbackQuery, state: FSMContext):
+    field = callback.data.replace("edit_", "")
+    state_map = {
+        "shifts": Survey.editing_shifts,
+        "birthday": Survey.editing_birthday,
+        "study_group": Survey.editing_study_group,
+        "hobbies": Survey.editing_hobbies
+    }
+    prompts = {
+        "shifts": "Введи новое количество отработанных смен:",
+        "birthday": "Введи новую дату рождения (ДД.ММ.ГГГГ):",
+        "study_group": "Введи новую группу обучения:",
+        "hobbies": "Расскажи о новых хобби или талантах:"
+    }
+    
+    await state.set_state(state_map[field])
+    await callback.message.edit_text(prompts[field])
+    await callback.answer()
+
+@dp.message(Survey.editing_shifts)
+async def save_edit_shifts(message: Message, state: FSMContext):
+    if not message.text.isdigit() or int(message.text) < 0:
+        await message.answer("Введи корректное число.")
+        return
+    update_user(message.from_user.id, {"shifts": int(message.text)})
+    await state.clear()
+    await message.answer("✅ Количество смен обновлено!", reply_markup=main_menu_keyboard)
+
+@dp.message(Survey.editing_birthday)
+async def save_edit_birthday(message: Message, state: FSMContext):
+    if not re.match(r"^\d{2}\.\d{2}\.\d{4}$", message.text):
+        await message.answer("Неверный формат. Используй ДД.ММ.ГГГГ.")
+        return
+    update_user(message.from_user.id, {"birthday": message.text})
+    await state.clear()
+    await message.answer("✅ Дата рождения обновлена!", reply_markup=main_menu_keyboard)
+
+@dp.message(Survey.editing_study_group)
+async def save_edit_study_group(message: Message, state: FSMContext):
+    update_user(message.from_user.id, {"study_group": message.text})
+    await state.clear()
+    await message.answer("✅ Группа обучения обновлена!", reply_markup=main_menu_keyboard)
+
+@dp.message(Survey.editing_hobbies)
+async def save_edit_hobbies(message: Message, state: FSMContext):
+    update_user(message.from_user.id, {"hobbies": message.text})
+    await state.clear()
+    await message.answer("✅ Хобби обновлены!", reply_markup=main_menu_keyboard)
+
+# --- ОБЩИЙ FALLBACK ---
 @dp.message()
 async def catch_all_messages(message: Message, state: FSMContext):
-    logger.info(f"Получено сообщение: '{message.text}' от {message.from_user.id}")
-    
     current_state = await state.get_state()
     
     if current_state == Registration.waiting_for_first_name:
         await state.update_data(first_name=message.text)
         await message.answer("Отлично! А теперь фамилия?")
         await state.set_state(Registration.waiting_for_last_name)
-        
     elif current_state == Registration.waiting_for_last_name:
         tg_id = message.from_user.id
         data = await state.get_data()
@@ -139,20 +308,16 @@ async def catch_all_messages(message: Message, state: FSMContext):
                 f"Твой баланс: {user['balance']} {vibes_word(user['balance'])}",
                 reply_markup=main_menu_keyboard
             )
-        else:
-            await message.answer("Ошибка при регистрации. Попробуй /start")
     else:
         await message.answer("Я тебя не понимаю. Используй кнопки меню 👇", reply_markup=main_menu_keyboard)
 
-# 4. Обработчик колбэков (на будущее)
 @dp.callback_query()
 async def catch_all_callbacks(callback: CallbackQuery):
-    logger.info(f"Получен колбэк: '{callback.data}'")
-    await callback.answer()
+    await callback.answer("Эта кнопка пока не активна")
 
 # --- ЗАПУСК ---
 async def main():
-    logger.info(" Бот запускается...")
+    logger.info("🚀 Бот запускается...")
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("✅ Вебхук удалён, запускаем polling...")
     await dp.start_polling(bot)
