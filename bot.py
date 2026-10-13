@@ -61,13 +61,13 @@ class Registration(StatesGroup):
 
 class Survey(StatesGroup):
     waiting_for_team = State()
-    waiting_for_shifts = State()
+    waiting_for_experience = State()
     waiting_for_birthday = State()
     waiting_for_study_group = State()
     waiting_for_hobbies = State()
     
     # Состояния для редактирования
-    editing_shifts = State()
+    editing_experience = State()
     editing_birthday = State()
     editing_study_group = State()
     editing_hobbies = State()
@@ -151,14 +151,14 @@ async def handle_survey_menu(message: Message):
         # Анкета заполнена, показываем данные и кнопки редактирования
         text = (f"📋 **Твоя анкета:**\n\n"
                 f"👥 Команда: {user['team'] or 'Не указано'}\n"
-                f"🔢 Смен отработано: {user['shifts'] or 'Не указано'}\n"
+                f"🔢 Смен отработано: {user['experience'] or 'Не указано'}\n"
                 f"🎂 Дата рождения: {user['birthday'] or 'Не указано'}\n"
                 f"📚 Группа обучения: {user['study_group'] or 'Не указано'}\n"
                 f"🎨 Хобби/таланты: {user['hobbies'] or 'Не указано'}\n\n"
                 f"Хочешь что-то изменить?")
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ Смены", callback_data="edit_shifts"), InlineKeyboardButton(text="✏️ ДР", callback_data="edit_birthday")],
+            [InlineKeyboardButton(text="✏️ Смены", callback_data="edit_experience"), InlineKeyboardButton(text="✏️ ДР", callback_data="edit_birthday")],
             [InlineKeyboardButton(text="✏️ Группа", callback_data="edit_study_group"), InlineKeyboardButton(text="✏️ Хобби", callback_data="edit_hobbies")]
         ])
         await message.answer(text, reply_markup=kb, parse_mode="Markdown")
@@ -175,16 +175,16 @@ async def process_team(callback: CallbackQuery, state: FSMContext):
     team = callback.data.replace("team_", "")
     await state.update_data(team=team)
     await callback.message.edit_text(f"Выбрано: {team} ✅\n\nСколько смен ты отработал всего (включая другие лагеря)?\nНапиши число, например: 3")
-    await state.set_state(Survey.waiting_for_shifts)
+    await state.set_state(Survey.waiting_for_experience)
     await callback.answer()
 
-@dp.message(Survey.waiting_for_shifts)
-async def process_shifts(message: Message, state: FSMContext):
+@dp.message(Survey.waiting_for_experience)
+async def process_experience(message: Message, state: FSMContext):
     if not message.text.isdigit() or int(message.text) < 0:
         await message.answer("Пожалуйста, введи корректное число смен (например: 3)")
         return
     
-    await state.update_data(shifts=int(message.text))
+    await state.update_data(experience=int(message.text))
     await message.answer("Отлично! Теперь укажи дату рождения в формате ДД.ММ.ГГГГ\nНапример: 15.06.1995")
     await state.set_state(Survey.waiting_for_birthday)
 
@@ -212,7 +212,7 @@ async def process_hobbies(message: Message, state: FSMContext):
     # Сохраняем всё в базу
     update_user(tg_id, {
         "team": data.get("team"),
-        "shifts": data.get("shifts"),
+        "experience": data.get("experience"),
         "birthday": data.get("birthday"),
         "study_group": data.get("study_group"),
         "hobbies": message.text,
@@ -238,13 +238,13 @@ async def process_hobbies(message: Message, state: FSMContext):
 async def start_edit(callback: CallbackQuery, state: FSMContext):
     field = callback.data.replace("edit_", "")
     state_map = {
-        "shifts": Survey.editing_shifts,
+        "experience": Survey.editing_experience,
         "birthday": Survey.editing_birthday,
         "study_group": Survey.editing_study_group,
         "hobbies": Survey.editing_hobbies
     }
     prompts = {
-        "shifts": "Введи новое количество отработанных смен:",
+        "experience": "Введи новое количество отработанных смен:",
         "birthday": "Введи новую дату рождения (ДД.ММ.ГГГГ):",
         "study_group": "Введи новую группу обучения:",
         "hobbies": "Расскажи о новых хобби или талантах:"
@@ -254,12 +254,12 @@ async def start_edit(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(prompts[field])
     await callback.answer()
 
-@dp.message(Survey.editing_shifts)
-async def save_edit_shifts(message: Message, state: FSMContext):
+@dp.message(Survey.editing_experience)
+async def save_edit_experience(message: Message, state: FSMContext):
     if not message.text.isdigit() or int(message.text) < 0:
         await message.answer("Введи корректное число.")
         return
-    update_user(message.from_user.id, {"shifts": int(message.text)})
+    update_user(message.from_user.id, {"experience": int(message.text)})
     await state.clear()
     await message.answer("✅ Количество смен обновлено!", reply_markup=main_menu_keyboard)
 
