@@ -574,7 +574,7 @@ async def create_sticker_pack_handler(callback: CallbackQuery):
         
         # Добавляем в список для отправки
         input_stickers.append(
-            InputSticker(sticker=sticker_file, emoji_list=[data["emoji"]])
+            InputSticker(sticker=sticker_file, format="static", emoji_list=[data["emoji"]])
         )
         
     # 4. Формируем уникальное имя пака (должно заканчиваться на _by_имя_бота, но Telegram сам добавит это, если имя занято, или мы сделаем уникальным)
