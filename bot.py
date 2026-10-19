@@ -10,6 +10,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from PIL import Image
+import io
 
 # Настраиваем логирование
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -38,7 +40,7 @@ def vibes_word(count):
 # --- КЛАВИАТУРЫ ---
 main_menu_keyboard = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="✨ Получить вайб")],
+        [KeyboardButton(text="✨ Получить вайб"), KeyboardButton(text=" Магазин")], 
         [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="📋 Посмотреть анкету")]
     ],
     resize_keyboard=True
@@ -102,6 +104,61 @@ def update_balance(tg_id: int, amount: int):
         supabase.table("users").update({"balance": new_balance}).eq("tg_id", tg_id).execute()
         return new_balance
     return None
+
+# --- МАГАЗИН И ПИТОМЦЫ ---
+
+def get_items(item_type: str):
+    """Получает список товаров определенного типа (pet или clothes)."""
+    response = supabase.table("items").select("*").eq("type", item_type).execute()
+    return response.data if response.data else []
+
+def get_user_inventory(user_tg_id: int):
+    """Получает список ID товаров, купленных пользователем."""
+    response = supabase.table("user_inventory").select("item_id").eq("user_tg_id", user_tg_id).execute()
+    return [item['item_id'] for item in response.data] if response.data else []
+
+def buy_item(user_tg_id: int, item_id: int, price: int):
+    """Покупает предмет, если хватает вайбов."""
+    user = get_user(user_tg_id)
+    if user['balance'] < price:
+        return False, "Не хватает вайбов!"
+    
+    # Списываем вайбы
+    update_balance(user_tg_id, -price)
+    
+    # Добавляем в инвентарь
+    supabase.table("user_inventory").insert({
+        "user_tg_id": user_tg_id,
+        "item_id": item_id
+    }).execute()
+    
+    return True, "Покупка успешна!"
+
+def generate_pet_image(user_tg_id: int):
+    """Генерирует картинку питомца с надетой одеждой."""
+    user = get_user(user_tg_id)
+    pet_id = user.get('equipped_pet_id')
+    
+    if not pet_id:
+        return None
+        
+    # Находим файл питомца
+    pet_item = supabase.table("items").select("filename").eq("id", pet_id).execute().data[0]
+    base_image = Image.open(f"assets/pets/{pet_item['filename']}").convert("RGBA")
+    
+    # Находим всю купленную одежду пользователя
+    inventory_ids = get_user_inventory(user_tg_id)
+    if not inventory_ids:
+        return base_image
+        
+    clothes_items = supabase.table("items").select("filename").in_("id", inventory_ids).eq("type", "clothes").execute().data
+    
+    # Накладываем одежду слоями
+    for cloth in clothes_items:
+        cloth_image = Image.open(f"assets/clothes/{cloth['filename']}").convert("RGBA")
+        base_image = Image.alpha_composite(base_image, cloth_image)
+        
+    return base_image
 
 # --- ФУНКЦИЯ РАССЫЛКИ ---
 async def send_broadcast_message(chat_id: int, text: str, button_text: str = None, button_url: str = None):
@@ -368,6 +425,68 @@ async def process_button_url(message: Message, state: FSMContext):
     is_test = (await state.get_data()).get("is_test", False)
     await process_broadcast(message.chat.id, state, is_test)
 
+# --- ОБРАБОТЧИКИ: МАГАЗИН И ПИТОМЦЫ ---
+
+@dp.message(F.text == "🛒 Магазин")
+async def shop_menu(message: Message):
+    tg_id = message.from_user.id
+    user = get_user(tg_id)
+    
+    if not user.get('equipped_pet_id'):
+        # Если питомец не выбран, показываем только стикманов
+        await message.answer("Выбери цвет своего стикмана:", reply_markup=get_pets_keyboard())
+    else:
+        # Иначе показываем одежду
+        clothes = get_items('clothes')
+        inventory = get_user_inventory(tg_id)
+        
+        text = "🛒 **Магазин одежды**\n\n"
+        keyboard = []
+        
+        for item in clothes:
+            status = "✅ Куплено" if item['id'] in inventory else f"Купить за {item['price']} вайбов"
+            keyboard.append([InlineKeyboardButton(text=f"{item['name']} - {status}", callback_data=f"buy_{item['id']}")])
+            
+        keyboard.append([InlineKeyboardButton(text="🐾 Мой питомец", callback_data="show_pet")])
+        
+        await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
+
+@dp.callback_query(F.data.startswith("buy_"))
+async def buy_item_callback(callback: CallbackQuery):
+    item_id = int(callback.data.replace("buy_", ""))
+    item = supabase.table("items").select("*").eq("id", item_id).execute().data[0]
+    
+    success, msg = buy_item(callback.from_user.id, item_id, item['price'])
+    await callback.answer(msg, show_alert=True)
+    if success:
+        await shop_menu(callback.message) # Обновляем меню магазина
+
+@dp.callback_query(F.data == "show_pet")
+async def show_pet(callback: CallbackQuery):
+    image = generate_pet_image(callback.from_user.id)
+    if image:
+        # Сохраняем в память и отправляем
+        bio = io.BytesIO()
+        image.save(bio, format='PNG')
+        bio.seek(0)
+        await callback.message.answer_photo(photo=bio, caption="Твой уникальный стикман! 🎨")
+    else:
+        await callback.answer("Сначала выбери питомца!", show_alert=True)
+
+def get_pets_keyboard():
+    pets = get_items('pet')
+    keyboard = []
+    for pet in pets:
+        keyboard.append([InlineKeyboardButton(text=pet['name'], callback_data=f"equip_pet_{pet['id']}")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+@dp.callback_query(F.data.startswith("equip_pet_"))
+async def equip_pet(callback: CallbackQuery):
+    pet_id = int(callback.data.replace("equip_pet_", ""))
+    update_user(callback.from_user.id, {"equipped_pet_id": pet_id})
+    await callback.answer("Питомец выбран! Теперь тебе доступен магазин одежды.", show_alert=True)
+    await shop_menu(callback.message)
+
 # --- ОБЩИЙ FALLBACK ---
 @dp.message()
 async def catch_all_messages(message: Message, state: FSMContext):
@@ -384,7 +503,7 @@ async def catch_all_messages(message: Message, state: FSMContext):
         user = add_user(tg_id, first_name, last_name)
         if user:
             await state.clear()
-            await message.answer(f"Приятно познакомиться, {first_name}! 🎉\nТы получил 1 вайб на старт.\nТвой баланс: {user['balance']} {vibes_word(user['balance'])}", reply_markup=main_menu_keyboard)
+            await message.answer(f"Приятно познакомиться, {first_name}! 🎉\nТы получил 1 вайб на старт.\nТвой баланс: {user['balance']} {vibes_word(user['balance'])}. Теперь выбери своего стикмана:", reply_markup=get_pets_keyboard())
     else:
         await message.answer("Я тебя не понимаю. Используй кнопки меню 👇", reply_markup=main_menu_keyboard)
 
