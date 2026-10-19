@@ -41,7 +41,7 @@ def vibes_word(count):
 # --- КЛАВИАТУРЫ ---
 main_menu_keyboard = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="✨ Получить вайб"), KeyboardButton(text=" Магазин")], 
+        [KeyboardButton(text="✨ Получить вайб"), KeyboardButton(text="🛒 Магазин")], 
         [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="📋 Посмотреть анкету")]
     ],
     resize_keyboard=True
