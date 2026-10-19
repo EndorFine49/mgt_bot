@@ -12,6 +12,7 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 from PIL import Image
 import io
+from aiogram.types import BufferedInputFile
 
 # Настраиваем логирование
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -464,14 +465,23 @@ async def buy_item_callback(callback: CallbackQuery):
 @dp.callback_query(F.data == "show_pet")
 async def show_pet(callback: CallbackQuery):
     image = generate_pet_image(callback.from_user.id)
+    
     if image:
-        # Сохраняем в память и отправляем
+        # Сохраняем картинку в память
         bio = io.BytesIO()
         image.save(bio, format='PNG')
         bio.seek(0)
-        await callback.message.answer_photo(photo=bio, caption="Твой уникальный стикман! 🎨")
+        
+        # Оборачиваем байты в специальный класс aiogram 3
+        photo_file = BufferedInputFile(file=bio.read(), filename="my_pet.png")
+        
+        # Отправляем фото
+        await callback.message.answer_photo(
+            photo=photo_file, 
+            caption="Твой уникальный стикман! 🎨"
+        )
     else:
-        await callback.answer("Сначала выбери питомца!", show_alert=True)
+        await callback.answer("Сначала выбери базового питомца в магазине!", show_alert=True)
 
 def get_pets_keyboard():
     pets = get_items('pet')
