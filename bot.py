@@ -607,13 +607,17 @@ async def create_sticker_pack_handler(callback: CallbackQuery):
         )
         
     except TelegramAPIError as e:
-        error_msg = str(e)
-        if "name" in error_msg.lower() or "invalid" in error_msg.lower():
+        error_msg = str(e).lower()
+        
+        # Если всё-таки произошла ошибка имени, даем четкую инструкцию
+        if "name" in error_msg or "invalid" in error_msg:
             await callback.message.answer(
-                "⚠️ Не удалось создать стикерпак. Возможно, ты уже создавал его недавно, или имя занято. Попробуй позже!"
+                "⚠️ Не удалось создать стикерпак из-за конфликта имен.\n\n"
+                "Пожалуйста, зайди в официальный бот @Stickers, напиши /delpack и удали старые тестовые наборы. После этого попробуй снова!"
             )
         else:
-            await callback.message.answer(f"Произошла ошибка при создании пака: {error_msg}")
+            await callback.message.answer(f"Произошла ошибка при создании пака. Попробуй позже.")
+            print(f"Sticker Pack Error: {e}") # Для тебя в логи
 
 # --- ОБЩИЙ FALLBACK ---
 @dp.message()
