@@ -13,6 +13,9 @@ from dotenv import load_dotenv
 from PIL import Image
 import io
 from aiogram.types import BufferedInputFile
+from PIL import Image, ImageDraw, ImageFont
+from aiogram.types import BufferedInputFile, InputSticker
+from aiogram.exceptions import TelegramAPIError
 
 # Настраиваем логирование
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -160,6 +163,41 @@ def generate_pet_image(user_tg_id: int):
         base_image = Image.alpha_composite(base_image, cloth_image)
         
     return base_image
+
+def prepare_sticker_image(base_image: Image.Image, text: str):
+    """Изменяет размер до 512x512 и добавляет текст снизу."""
+    # 1. Приводим к размеру 512x512 (требование Telegram)
+    img = base_image.resize((512, 512), Image.Resampling.LANCZOS).convert("RGBA")
+    draw = ImageDraw.Draw(img)
+    
+    # 2. Загружаем шрифт (если файла нет, используем стандартный, но он будет мелким)
+    try:
+        font = ImageFont.truetype("assets/font.ttf", 48)
+    except IOError:
+        font = ImageFont.load_default()
+        print("ВНИМАНИЕ: Файл assets/font.ttf не найден! Текст может быть мелким.")
+    
+    # 3. Вычисляем позицию текста (по центру снизу)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    x = (512 - text_width) / 2
+    y = 512 - text_height - 30 # Отступ 30px от низа
+    
+    # 4. Рисуем текст с черной обводкой для читаемости на любом фоне
+    outline_color = "black"
+    fill_color = "white"
+    
+    # Рисуем обводку (смещая текст на 2 пикселя в 4 стороны)
+    draw.text((x-2, y-2), text, font=font, fill=outline_color)
+    draw.text((x+2, y-2), text, font=font, fill=outline_color)
+    draw.text((x-2, y+2), text, font=font, fill=outline_color)
+    draw.text((x+2, y+2), text, font=font, fill=outline_color)
+    
+    # Рисуем основной текст
+    draw.text((x, y), text, font=font, fill=fill_color)
+    
+    return img
 
 # --- ФУНКЦИЯ РАССЫЛКИ ---
 async def send_broadcast_message(chat_id: int, text: str, button_text: str = None, button_url: str = None):
@@ -467,18 +505,19 @@ async def show_pet(callback: CallbackQuery):
     image = generate_pet_image(callback.from_user.id)
     
     if image:
-        # Сохраняем картинку в память
         bio = io.BytesIO()
         image.save(bio, format='PNG')
         bio.seek(0)
-        
-        # Оборачиваем байты в специальный класс aiogram 3
         photo_file = BufferedInputFile(file=bio.read(), filename="my_pet.png")
         
-        # Отправляем фото
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎨 Создать стикерпак (20 вайбов)", callback_data="create_sticker_pack")]
+        ])
+        
         await callback.message.answer_photo(
             photo=photo_file, 
-            caption="Твой уникальный стикман! 🎨"
+            caption="Твой уникальный стикман! 🎨\n\nТы можешь сделать из него свой стикерпак для чатов!",
+            reply_markup=keyboard
         )
     else:
         await callback.answer("Сначала выбери базового питомца в магазине!", show_alert=True)
@@ -496,6 +535,83 @@ async def equip_pet(callback: CallbackQuery):
     update_user(callback.from_user.id, {"equipped_pet_id": pet_id})
     await callback.answer("Питомец выбран! Теперь тебе доступен магазин одежды.", show_alert=True)
     await shop_menu(callback.message)
+
+@dp.callback_query(F.data == "create_sticker_pack")
+async def create_sticker_pack_handler(callback: CallbackQuery):
+    tg_id = callback.from_user.id
+    user = get_user(tg_id)
+    
+    # 1. Проверка баланса
+    if user['balance'] < 20:
+        return await callback.answer("Не хватает вайбов! Нужно 20 🪙", show_alert=True)
+        
+    # 2. Проверка наличия питомца
+    base_img = generate_pet_image(tg_id)
+    if not base_img:
+        return await callback.answer("Сначала выбери базового питомца в магазине!", show_alert=True)
+        
+    await callback.answer("Генерирую стикеры и создаю пак... ⏳")
+    
+    # 3. Данные для 3-х стикеров
+    stickers_data = [
+        {"text": "ок 👌", "emoji": "👌"},
+        {"text": "понимаемо 🤝", "emoji": "🤝"},
+        {"text": "привет ✌️", "emoji": "✌️"}
+    ]
+    
+    input_stickers = []
+    for data in stickers_data:
+        # Генерируем картинку
+        sticker_img = prepare_sticker_image(base_img, data["text"])
+        
+        # Сохраняем в память
+        bio = io.BytesIO()
+        sticker_img.save(bio, format='PNG')
+        bio.seek(0)
+        
+        # Оборачиваем для aiogram
+        sticker_file = BufferedInputFile(file=bio.read(), filename=f"sticker_{data['emoji']}.png")
+        
+        # Добавляем в список для отправки
+        input_stickers.append(
+            InputSticker(sticker=sticker_file, emoji_list=[data["emoji"]])
+        )
+        
+    # 4. Формируем уникальное имя пака (должно заканчиваться на _by_имя_бота, но Telegram сам добавит это, если имя занято, или мы сделаем уникальным)
+    # Для надежности добавляем часть tg_id, чтобы имя было уникальным
+    pack_name = f"mgt_pet_{tg_id}"
+    pack_title = f"Стикеры {user['first_name']}"
+    
+    try:
+        # 5. Создаем стикерпак одним запросом (aiogram 3 позволяет передать список stickers сразу)
+        await bot.create_new_sticker_set(
+            user_id=tg_id,
+            name=pack_name,
+            title=pack_title,
+            stickers=input_stickers,
+            sticker_type="regular"
+        )
+        
+        # 6. Списываем вайбы
+        update_balance(tg_id, -20)
+        
+        # 7. Отправляем ссылку пользователю
+        await callback.message.answer(
+            f"🎉 Твой личный стикерпак готов!\n"
+            f"С баланса списано 20 вайбов.\n\n"
+            f"👉 <a href='https://t.me/addstickers/{pack_name}'>Добавить стикеры в Telegram</a>",
+            disable_web_page_preview=True,
+            parse_mode="HTML"
+        )
+        
+    except TelegramAPIError as e:
+        error_msg = str(e)
+        if "name" in error_msg.lower() or "invalid" in error_msg.lower():
+            await callback.message.answer(
+                "⚠️ Не удалось создать стикерпак. Возможно, ты уже создавал его недавно, или имя занято. Попробуй позже!"
+            )
+        else:
+            await callback.message.answer(f"Произошла ошибка при создании пака: {error_msg}")
 
 # --- ОБЩИЙ FALLBACK ---
 @dp.message()
