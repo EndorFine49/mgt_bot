@@ -28,6 +28,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_IDS = [int(id.strip()) for id in os.getenv("ADMIN_IDS", "").split(",") if id.strip()]
+BOT_USERNAME = os.getenv("BOT_USERNAME")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -581,7 +582,7 @@ async def create_sticker_pack_handler(callback: CallbackQuery):
     # 4. Формируем уникальное имя пака (должно заканчиваться на _by_имя_бота, но Telegram сам добавит это, если имя занято, или мы сделаем уникальным)
     # Для надежности добавляем часть tg_id, чтобы имя было уникальным
     random_suffix = random.randint(1000, 9999)
-    pack_name = f"mgt_pet_{tg_id}_{random_suffix}"
+    pack_name = f"mgt_pet_{tg_id}_{random_suffix}_by_{BOT_USERNAME}"
     pack_title = f"Стикеры {user['first_name']}"
     
     try:
@@ -607,17 +608,12 @@ async def create_sticker_pack_handler(callback: CallbackQuery):
         )
         
     except TelegramAPIError as e:
-        error_msg = str(e).lower()
+        # Используем logger, чтобы ошибка точно попала в логи хостинга
+        logger.error(f"Ошибка создания стикерпака для user {tg_id}: {e}")
         
-        # Если всё-таки произошла ошибка имени, даем четкую инструкцию
-        if "name" in error_msg or "invalid" in error_msg:
-            await callback.message.answer(
-                "⚠️ Не удалось создать стикерпак из-за конфликта имен.\n\n"
-                "Пожалуйста, зайди в официальный бот @Stickers, напиши /delpack и удали старые тестовые наборы. После этого попробуй снова!"
-            )
-        else:
-            await callback.message.answer(f"Произошла ошибка при создании пака. Попробуй позже.")
-            print(f"Sticker Pack Error: {e}") # Для тебя в логи
+        await callback.message.answer(
+            "⚠️ Не удалось создать стикерпак. Попробуй нажать кнопку еще раз через пару минут."
+        )
 
 # --- ОБЩИЙ FALLBACK ---
 @dp.message()
