@@ -167,37 +167,44 @@ def generate_pet_image(user_tg_id: int):
     return base_image
 
 def prepare_sticker_image(base_image: Image.Image, text: str):
-    """Изменяет размер до 512x512 и добавляет текст снизу."""
-    # 1. Приводим к размеру 512x512 (требование Telegram)
+    """Изменяет размер до 512x512 и добавляет текст с подложкой."""
+    # 1. Приводим к размеру 512x512 (строгое требование Telegram)
     img = base_image.resize((512, 512), Image.Resampling.LANCZOS).convert("RGBA")
     draw = ImageDraw.Draw(img)
     
-    # 2. Загружаем шрифт (если файла нет, используем стандартный, но он будет мелким)
+    # 2. Загружаем шрифт
+    font_path = "assets/font.ttf"
+    font_size = 50
+    
     try:
-        font = ImageFont.truetype("assets/font.ttf", 48)
+        font = ImageFont.truetype(font_path, font_size)
+        logger.info(f"✅ Шрифт успешно загружен: {font_path}")
     except IOError:
+        logger.warning(f"⚠️ Шрифт {font_path} НЕ НАЙДЕН! Использую стандартный (текст будет очень мелким).")
         font = ImageFont.load_default()
-        print("ВНИМАНИЕ: Файл assets/font.ttf не найден! Текст может быть мелким.")
+        font_size = 150 
+        
+    # 3. Вычисляем точные размеры текста
+    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+    text_width = right - left
+    text_height = bottom - top
     
-    # 3. Вычисляем позицию текста (по центру снизу)
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
+    # 4. Позиция: по центру, внизу, с отступом 40px от нижнего края
     x = (512 - text_width) / 2
-    y = 512 - text_height - 30 # Отступ 30px от низа
+    y = 512 - text_height - 40 
     
-    # 4. Рисуем текст с черной обводкой для читаемости на любом фоне
-    outline_color = "black"
-    fill_color = "white"
-    
-    # Рисуем обводку (смещая текст на 2 пикселя в 4 стороны)
-    draw.text((x-2, y-2), text, font=font, fill=outline_color)
-    draw.text((x+2, y-2), text, font=font, fill=outline_color)
-    draw.text((x-2, y+2), text, font=font, fill=outline_color)
-    draw.text((x+2, y+2), text, font=font, fill=outline_color)
-    
-    # Рисуем основной текст
-    draw.text((x, y), text, font=font, fill=fill_color)
+    logger.info(f"Рисую текст '{text}' на координатах x={x}, y={y}, размер={text_width}x{text_height}")
+
+    # 5. Рисуем стильную полупрозрачную подложку (pill) для читаемости на любом фоне
+    padding = 20
+    draw.rounded_rectangle(
+        [x - padding, y - padding, x + text_width + padding, y + text_height + padding],
+        radius=20,
+        fill=(0, 0, 0, 180)  # Черный цвет с прозрачностью ~70% (0-255)
+    )
+
+    # 6. Рисуем сам текст (ярко-белый)
+    draw.text((x, y), text, font=font, fill="white")
     
     return img
 
@@ -556,9 +563,9 @@ async def create_sticker_pack_handler(callback: CallbackQuery):
     
     # 3. Данные для 3-х стикеров
     stickers_data = [
-        {"text": "ок 👌", "emoji": "👌"},
-        {"text": "понимаемо 🤝", "emoji": "🤝"},
-        {"text": "привет ✌️", "emoji": "✌️"}
+        {"text": "ОК", "emoji": "👌"},
+        {"text": "Понимаемо", "emoji": "🤝"},
+        {"text": "Привет!", "emoji": "✌️"}
     ]
     
     input_stickers = []
