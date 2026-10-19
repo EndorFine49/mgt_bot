@@ -16,6 +16,7 @@ from aiogram.types import BufferedInputFile
 from PIL import Image, ImageDraw, ImageFont
 from aiogram.types import BufferedInputFile, InputSticker
 from aiogram.exceptions import TelegramAPIError
+import random
 
 # Настраиваем логирование
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -579,7 +580,8 @@ async def create_sticker_pack_handler(callback: CallbackQuery):
         
     # 4. Формируем уникальное имя пака (должно заканчиваться на _by_имя_бота, но Telegram сам добавит это, если имя занято, или мы сделаем уникальным)
     # Для надежности добавляем часть tg_id, чтобы имя было уникальным
-    pack_name = f"mgt_pet_{tg_id}"
+    random_suffix = random.randint(1000, 9999)
+    pack_name = f"mgt_pet_{tg_id}_{random_suffix}"
     pack_title = f"Стикеры {user['first_name']}"
     
     try:
