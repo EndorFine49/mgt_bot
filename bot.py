@@ -42,7 +42,7 @@ def vibes_word(count):
 # --- КЛАВИАТУРЫ ---
 main_menu_keyboard = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="✨ Получить вайб"), KeyboardButton(text="🛒 Магазин")],
+        [KeyboardButton(text="🐾 Посмотреть на питомца"), KeyboardButton(text="🛒 Магазин")],
         [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="📋 Посмотреть анкету")]
     ],
     resize_keyboard=True
@@ -121,23 +121,39 @@ def buy_item(user_tg_id: int, item_id: int, price: int):
 
 # --- ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ---
 def generate_pet_image(user_tg_id: int):
+    """Генерирует картинку питомца с надетой одеждой в правильном порядке."""
     user = get_user(user_tg_id)
     pet_id = user.get('equipped_pet_id')
-    if not pet_id: return None
+    if not pet_id:
+        return None
     
+    # Открываем базовое изображение питомца
     pet_item = supabase.table("items").select("filename").eq("id", pet_id).execute().data[0]
     base_image = Image.open(f"assets/pets/{pet_item['filename']}").convert("RGBA")
     
-    # Берем только то, что реально надето (слоты)
-    equipped_ids = [user.get('equipped_head_id'), user.get('equipped_top_id'), user.get('equipped_bottom_id')]
+    # Получаем ID надетых предметов
+    equipped_ids = [
+        user.get('equipped_bottom_id'),
+        user.get('equipped_top_id'),
+        user.get('equipped_head_id')
+    ]
     equipped_ids = [eid for eid in equipped_ids if eid]
     
-    if not equipped_ids: return base_image
-        
-    clothes_items = supabase.table("items").select("filename").in_("id", equipped_ids).execute().data
-    for cloth in clothes_items:
-        cloth_image = Image.open(f"assets/clothes/{cloth['filename']}").convert("RGBA")
-        base_image = Image.alpha_composite(base_image, cloth_image)
+    if not equipped_ids:
+        return base_image
+    
+    # Получаем filenames в том же порядке (bottom → top → head)
+    clothes_items = supabase.table("items").select("id", "filename").in_("id", equipped_ids).execute().data
+    
+    # Создаём словарь для быстрого доступа
+    items_dict = {item['id']: item['filename'] for item in clothes_items}
+    
+    # Накладываем одежду в правильном порядке: низ → верх → голова
+    for equipped_id in equipped_ids:
+        if equipped_id in items_dict:
+            cloth_image = Image.open(f"assets/clothes/{items_dict[equipped_id]}").convert("RGBA")
+            base_image = Image.alpha_composite(base_image, cloth_image)
+    
     return base_image
 
 def prepare_sticker_image(base_image: Image.Image, text: str):
@@ -347,12 +363,18 @@ async def save_edit_hobbies(message: Message, state: FSMContext):
 # --- ОБРАБОТЧИКИ: МАГАЗИН ---
 @dp.message(F.text == "🛒 Магазин")
 async def shop_menu(message: Message):
+    user = get_user(message.from_user.id)
+    if not user or not user.get('equipped_pet_id'):
+        await message.answer("Сначала выбери цвет своего стикмана!", reply_markup=main_menu_keyboard)
+        return
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎩 Голова", callback_data="shop_cat_head"), InlineKeyboardButton(text="👕 Верх", callback_data="shop_cat_top"), InlineKeyboardButton(text="👖 Низ", callback_data="shop_cat_bottom")],
-        [InlineKeyboardButton(text="🐾 Мой питомец", callback_data="show_pet")]
+        [InlineKeyboardButton(text="🎩 Голова", callback_data="shop_cat_head"), 
+         InlineKeyboardButton(text="👕 Верх", callback_data="shop_cat_top"), 
+         InlineKeyboardButton(text="👖 Низ", callback_data="shop_cat_bottom")]
     ])
     await message.answer("🛒 **Магазин одежды**\n\nВыбери категорию:", reply_markup=kb, parse_mode="Markdown")
-
+    
 @dp.callback_query(F.data.startswith("shop_cat_"))
 async def shop_category(callback: CallbackQuery):
     category = callback.data.replace("shop_cat_", "")
@@ -483,7 +505,7 @@ async def show_pet(callback: CallbackQuery):
     else:
         await callback.answer("Сначала выбери питомца!", show_alert=True)
 
-# --- СТikЕРПАК И ОСНОВНЫЕ КНОПКИ (Без изменений) ---
+# --- СТИКЕРПАК И ОСНОВНЫЕ КНОПКИ (Без изменений) ---
 @dp.callback_query(F.data == "create_sticker_pack")
 async def create_sticker_pack_handler(callback: CallbackQuery):
     tg_id = callback.from_user.id
@@ -510,13 +532,24 @@ async def create_sticker_pack_handler(callback: CallbackQuery):
         logger.error(f"Sticker error: {e}")
         await callback.message.answer("⚠️ Ошибка создания пака. Попробуй позже.")
 
-@dp.message(F.text == "✨ Получить вайб")
-async def handle_claim_vibe(message: Message):
-    user = get_user(message.from_user.id)
-    if user:
-        new_balance = update_balance(message.from_user.id, 1)
-        await message.answer(f"Тебе +1 вайб! ✨\nБаланс: {new_balance} {vibes_word(new_balance)}")
-    else: await message.answer("Сначала /start", reply_markup=main_menu_keyboard)
+@dp.message(F.text == "🐾 Посмотреть на питомца")
+async def handle_show_pet(message: Message):
+    image = generate_pet_image(message.from_user.id)
+    if image:
+        bio = io.BytesIO()
+        image.save(bio, format='PNG')
+        bio.seek(0)
+        photo_file = BufferedInputFile(file=bio.read(), filename="my_pet.png")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎨 Создать стикерпак (20 вайбов)", callback_data="create_sticker_pack")]
+        ])
+        await message.answer_photo(
+            photo=photo_file, 
+            caption="Твой уникальный стикман! 🎨\n\nТы можешь сделать из него свой стикерпак для чатов!",
+            reply_markup=keyboard
+        )
+    else:
+        await message.answer("Сначала выбери базового питомца в магазине!", reply_markup=main_menu_keyboard)
 
 @dp.message(F.text == "💰 Баланс")
 async def handle_balance(message: Message):
