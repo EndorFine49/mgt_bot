@@ -361,7 +361,10 @@ async def shop_category(callback: CallbackQuery):
     
     kb = [[InlineKeyboardButton(text=g, callback_data=f"shop_group_{category}_{g}")] for g in groups]
     kb.append([InlineKeyboardButton(text="🔙 Назад в магазин", callback_data="shop_back")])
-    await callback.message.edit_text(f"🛒 Категория: {category}\nВыбери предмет:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    
+    # Удаляем текущее сообщение (может быть фото) и отправляем новое
+    await callback.message.delete()
+    await callback.message.answer(f"🛒 Категория: {category}\nВыбери предмет:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     await callback.answer()
 
 @dp.callback_query(F.data == "shop_back")
@@ -382,7 +385,10 @@ async def shop_item(callback: CallbackQuery):
         status = "✅ В инвентаре" if item['id'] in inventory else f"{item['price']} вайбов"
         kb.append([InlineKeyboardButton(text=f"{item['name']} — {status}", callback_data=f"shop_color_{item['id']}")])
     kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data=f"shop_cat_{category}")])
-    await callback.message.edit_text(f"🛒 {group_name}\nВыбери цвет:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    
+    # Удаляем текущее сообщение (может быть фото) и отправляем новое
+    await callback.message.delete()
+    await callback.message.answer(f"🛒 {group_name}\nВыбери цвет:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("shop_color_"))
