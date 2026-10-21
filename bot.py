@@ -407,11 +407,11 @@ async def save_edit_hobbies(message: Message, state: FSMContext):
     await message.answer("✅ Хобби обновлены!", reply_markup=main_menu_keyboard)
 
 # --- ОБРАБОТЧИКИ: МАГАЗИН ---
-@dp.message(F.text == "🛒 Магазин")
-async def shop_menu(message: Message):
-    user = get_user(message.from_user.id)
+async def show_shop_menu(tg_id: int, target):
+    """Вспомогательная функция для отображения магазина."""
+    user = get_user(tg_id)
     if not user or not user.get('equipped_pet_id'):
-        await message.answer("Сначала выбери цвет своего стикмана!", reply_markup=main_menu_keyboard)
+        await target.answer("Сначала выбери цвет своего стикмана!", reply_markup=main_menu_keyboard)
         return
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -419,7 +419,17 @@ async def shop_menu(message: Message):
          InlineKeyboardButton(text="👕 Верх", callback_data="shop_cat_top"), 
          InlineKeyboardButton(text="👖 Низ", callback_data="shop_cat_bottom")]
     ])
-    await message.answer("🛒 **Магазин одежды**\n\nВыбери категорию:", reply_markup=kb, parse_mode="Markdown")
+    await target.answer("🛒 **Магазин одежды**\n\nВыбери категорию:", reply_markup=kb, parse_mode="Markdown")
+
+@dp.message(F.text == "🛒 Магазин")
+async def shop_menu(message: Message):
+    await show_shop_menu(message.from_user.id, message)
+
+@dp.callback_query(F.data == "shop_back")
+async def shop_back(callback: CallbackQuery):
+    await callback.message.delete()
+    await show_shop_menu(callback.from_user.id, callback.message)
+    await callback.answer()
     
 @dp.callback_query(F.data.startswith("shop_cat_"))
 async def shop_category(callback: CallbackQuery):
@@ -435,11 +445,6 @@ async def shop_category(callback: CallbackQuery):
     await callback.message.answer(f"🛒 Категория: {category}\nВыбери предмет:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     await callback.answer()
 
-@dp.callback_query(F.data == "shop_back")
-async def shop_back(callback: CallbackQuery):
-    await callback.message.delete()
-    await shop_menu(callback.message)
-    await callback.answer()
 
 @dp.callback_query(F.data.startswith("shop_group_"))
 async def shop_item(callback: CallbackQuery):
