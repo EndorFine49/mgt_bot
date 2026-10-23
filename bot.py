@@ -40,13 +40,16 @@ def vibes_word(count):
     return "вайбов"
 
 # --- КЛАВИАТУРЫ ---
-main_menu_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🐾 Посмотреть на питомца"), KeyboardButton(text="🛒 Магазин")],
-        [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="📋 Посмотреть анкету")]
-    ],
-    resize_keyboard=True
-)
+def get_main_keyboard(tg_id: int) -> ReplyKeyboardMarkup:
+    """Возвращает главное меню с учетом прав пользователя."""
+    rows = [
+        [KeyboardButton(text="👤 Мой профиль"), KeyboardButton(text="🛒 Магазин")],
+        [KeyboardButton(text="📋 Задания")]
+    ]
+    if tg_id in ADMIN_IDS:
+        rows.append([KeyboardButton(text="🛠 Админ-панель")])
+    
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 TEAM_OPTIONS = ["Джем", "Драйв", "Сияй", "Начало", "Big Family", "Полис", "Крым Team", "Не состою в команде"]
 
@@ -75,12 +78,6 @@ class Survey(StatesGroup):
     editing_birthday = State()
     editing_study_group = State()
     editing_hobbies = State()
-
-class Broadcast(StatesGroup):
-    waiting_for_text = State()
-    waiting_for_button_choice = State()
-    waiting_for_button_text = State()
-    waiting_for_button_url = State()
 
 # --- БАЗА ДАННЫХ ---
 def get_user(tg_id: int):
@@ -213,7 +210,7 @@ async def cmd_start(message: Message, state: FSMContext):
     tg_id = message.from_user.id
     user = get_user(tg_id)
     if user:
-        await message.answer(f"С возвращением, {user['first_name']}! 👋\nТвой баланс: {user['balance']} {vibes_word(user['balance'])}", reply_markup=main_menu_keyboard)
+        await message.answer(f"С возвращением, {user['first_name']}! 👋\nТвой баланс: {user['balance']} {vibes_word(user['balance'])}", reply_markup=get_main_keyboard(tg_id))
     else:
         await state.set_state(Registration.waiting_for_first_name)
         await message.answer("Привет! Давай познакомимся. Как твое имя?")
@@ -286,7 +283,201 @@ async def confirm_pet(callback: CallbackQuery):
 async def skip_survey(callback: CallbackQuery):
     update_user(callback.from_user.id, {"survey_completed": True})
     await callback.message.edit_caption(caption="Хорошо! Ты всегда можешь вернуться к анкете через главное меню.")
-    await callback.message.answer("Главное меню:", reply_markup=main_menu_keyboard)
+    await callback.message.answer("Главное меню:", reply_markup=get_main_keyboard(callback.from_user.id))
+    await callback.answer()
+
+# --- ОБРАБОТЧИКИ МЕНЮ ---
+@dp.message(F.text == "👤 Мой профиль")
+async def handle_profile(message: Message):
+    tg_id = message.from_user.id
+    user = get_user(tg_id)
+    if not user:
+        return await message.answer("Сначала зарегистрируйся через /start", reply_markup=get_main_keyboard(tg_id))
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Баланс", callback_data="profile_balance"),
+         InlineKeyboardButton(text="🐾 Мой питомец", callback_data="profile_pet")]
+    ])
+    await message.answer("👤 **Мой профиль**\n\nВыбери раздел:", reply_markup=kb, parse_mode="Markdown")
+
+@dp.callback_query(F.data == "profile_balance")
+async def profile_balance(callback: CallbackQuery):
+    tg_id = callback.from_user.id
+    user = get_user(tg_id)
+    if user:
+        text = f"💰 Твой баланс: {user['balance']} {vibes_word(user['balance'])}"
+        
+        # Показываем рейтинг команд
+        teams_rating = get_teams_rating()
+        if teams_rating:
+            text += "\n\n🏆 **Рейтинг команд:**\n"
+            for i, team in enumerate(teams_rating, 1):
+                medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+                text += f"{medal} {team['name']}: {team['balance']} {vibes_word(team['balance'])}\n"
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile_back")]
+        ])
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "profile_pet")
+async def profile_pet(callback: CallbackQuery):
+    image = generate_pet_image(callback.from_user.id)
+    if image:
+        bio = io.BytesIO()
+        image.save(bio, format='PNG')
+        bio.seek(0)
+        photo_file = BufferedInputFile(file=bio.read(), filename="my_pet.png")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎨 Создать стикерпак (20 вайбов)", callback_data="create_sticker_pack")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile_back")]
+        ])
+        await callback.message.answer_photo(
+            photo=photo_file,
+            caption="Твой уникальный стикман! 🎨",
+            reply_markup=kb
+        )
+    else:
+        await callback.answer("Сначала выбери базового питомца в магазине!", show_alert=True)
+
+@dp.callback_query(F.data == "profile_back")
+async def profile_back(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Баланс", callback_data="profile_balance"),
+         InlineKeyboardButton(text="🐾 Мой питомец", callback_data="profile_pet")]
+    ])
+    await callback.message.edit_text("👤 **Мой профиль**\n\nВыбери раздел:", reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "claim_vibe_inline")
+async def claim_vibe_inline(callback: CallbackQuery):
+    tg_id = callback.from_user.id
+    user = get_user(tg_id)
+    if user:
+        new_balance, team_name = add_vibes(tg_id, 1)
+        text = f"Тебе +1 вайб! ✨\nТвой баланс: {new_balance} {vibes_word(new_balance)}"
+        if team_name:
+            text += f"\n\n🎯 Твоя команда **{team_name}** тоже получила +1 вайб!"
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✨ Получить ещё", callback_data="claim_vibe_inline")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile_back")]
+        ])
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.message(F.text == "📋 Задания")
+async def handle_tasks(message: Message):
+    tg_id = message.from_user.id
+    user = get_user(tg_id)
+    if not user:
+        return await message.answer("Сначала зарегистрируйся через /start", reply_markup=get_main_keyboard(tg_id))
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="tasks_back")]
+    ])
+    await message.answer("📋 **Задания**\n\nВыполняй задания и получай вайбы!", reply_markup=kb, parse_mode="Markdown")
+
+@dp.callback_query(F.data == "tasks_back")
+async def tasks_back(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="tasks_back")]
+    ])
+    await callback.message.edit_text("📋 **Задания**\n\nВыполняй задания и получай вайбы!", reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.message(F.text == "🛠 Админ-панель")
+async def show_admin_panel(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.answer("У тебя нет прав администратора.")
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Рассылки", callback_data="admin_broadcast_menu"),
+         InlineKeyboardButton(text="👥 Команды", callback_data="admin_teams_menu")],
+        [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="admin_exit")]
+    ])
+    await message.answer("🛠 **Админ-панель**\n\nВыбери раздел:", reply_markup=kb, parse_mode="Markdown")
+
+@dp.callback_query(F.data == "admin_broadcast_menu")
+async def admin_broadcast_menu(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Нет доступа", show_alert=True)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📨 Всем пользователям", callback_data="broadcast_start")],
+        [InlineKeyboardButton(text="🧪 Тест (только мне)", callback_data="broadcast_test")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")]
+    ])
+    await callback.message.edit_text("📢 **Рассылки**\n\nВыбери режим:", reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_teams_menu")
+async def admin_teams_menu(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Нет доступа", show_alert=True)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏆 Рейтинг команд", callback_data="admin_teams_rating")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")]
+    ])
+    await callback.message.edit_text("👥 **Команды**\n\nВыбери действие:", reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_teams_rating")
+async def admin_teams_rating(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Нет доступа", show_alert=True)
+    
+    teams_rating = get_teams_rating()
+    if teams_rating:
+        text = "🏆 **Рейтинг команд:**\n\n"
+        for i, team in enumerate(teams_rating, 1):
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+            text += f"{medal} {team['name']}: {team['balance']} {vibes_word(team['balance'])}\n"
+    else:
+        text = "Нет данных о командах."
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_teams_menu")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_back")
+async def admin_back(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Нет доступа", show_alert=True)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Рассылки", callback_data="admin_broadcast_menu"),
+         InlineKeyboardButton(text="👥 Команды", callback_data="admin_teams_menu")],
+        [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="admin_exit")]
+    ])
+    await callback.message.edit_text("🛠 **Админ-панель**\n\nВыбери раздел:", reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_exit")
+async def admin_exit(callback: CallbackQuery):
+    await callback.message.edit_text("Вернулся в главное меню 👇")
+    await callback.answer()
+
+@dp.callback_query(F.data.in_(["broadcast_start", "broadcast_test"]))
+async def broadcast_mode(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Нет доступа", show_alert=True)
+    
+    is_test = callback.data == "broadcast_test"
+    await state.update_data(is_test=is_test)
+    await state.set_state(Broadcast.waiting_for_text)
+    
+    text = ("🧪 **Тестовая рассылка**\n\nПришли текст сообщения, оно придёт только тебе.\n\nОтмена — /cancel"
+            if is_test else
+            "📢 **Режим рассылки**\n\nПришли текст сообщения, который нужно разослать всем пользователям.\n\n_Поддерживается Markdown: *жирный*, _курсив_, `код`_\n\nОтмена — /cancel")
+    await callback.message.edit_text(text, parse_mode="Markdown")
     await callback.answer()
 
 # --- ОБРАБОТЧИКИ: АНКЕТА ---
@@ -343,12 +534,12 @@ async def process_hobbies(message: Message, state: FSMContext):
         text += f"\n\n🎯 Твоя команда **{team_name}** тоже получила +5 вайбов!"
     
     await state.clear()
-    await message.answer(text, reply_markup=main_menu_keyboard, parse_mode="Markdown")
+    await message.answer(text, reply_markup=get_main_keyboard(tg_id), parse_mode="Markdown")
 
 @dp.message(F.text == "📋 Посмотреть анкету")
 async def handle_survey_menu(message: Message):
     user = get_user(message.from_user.id)
-    if not user: return await message.answer("Сначала /start", reply_markup=main_menu_keyboard)
+    if not user: return await message.answer("Сначала /start", reply_markup=get_main_keyboard(message.from_user.id))
 
     if not user.get("survey_completed"):
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📝 Заполнить анкету (+5 вайбов)", callback_data="start_survey")]])
@@ -377,7 +568,7 @@ async def start_edit(callback: CallbackQuery, state: FSMContext):
 async def save_edit_team(callback: CallbackQuery, state: FSMContext):
     update_user(callback.from_user.id, {"team": callback.data.replace("team_", "")})
     await state.clear()
-    await callback.message.answer("✅ Команда обновлена!", reply_markup=main_menu_keyboard)
+    await callback.message.answer("✅ Команда обновлена!", reply_markup=get_main_keyboard(callback.from_user.id))
     await callback.answer()
 
 @dp.message(Survey.editing_shifts)
@@ -385,33 +576,33 @@ async def save_edit_shifts(message: Message, state: FSMContext):
     if not message.text.isdigit(): return await message.answer("Введи число.")
     update_user(message.from_user.id, {"experience": int(message.text)})
     await state.clear()
-    await message.answer("✅ Опыт обновлен!", reply_markup=main_menu_keyboard)
+    await message.answer("✅ Опыт обновлен!", reply_markup=get_main_keyboard(message.from_user.id))
 
 @dp.message(Survey.editing_birthday)
 async def save_edit_birthday(message: Message, state: FSMContext):
     if not re.match(r"^\d{2}\.\d{2}\.\d{4}$", message.text): return await message.answer("Неверный формат.")
     update_user(message.from_user.id, {"birthday": message.text})
     await state.clear()
-    await message.answer("✅ ДР обновлено!", reply_markup=main_menu_keyboard)
+    await message.answer("✅ ДР обновлено!", reply_markup=get_main_keyboard(message.from_user.id))
 
 @dp.message(Survey.editing_study_group)
 async def save_edit_study_group(message: Message, state: FSMContext):
     update_user(message.from_user.id, {"study_group": message.text})
     await state.clear()
-    await message.answer("✅ Группа обновлена!", reply_markup=main_menu_keyboard)
+    await message.answer("✅ Группа обновлена!", reply_markup=get_main_keyboard(message.from_user.id))
 
 @dp.message(Survey.editing_hobbies)
 async def save_edit_hobbies(message: Message, state: FSMContext):
     update_user(message.from_user.id, {"hobbies": message.text})
     await state.clear()
-    await message.answer("✅ Хобби обновлены!", reply_markup=main_menu_keyboard)
+    await message.answer("✅ Хобби обновлены!", reply_markup=get_main_keyboard(message.from_user.id))
 
 # --- ОБРАБОТЧИКИ: МАГАЗИН ---
 async def show_shop_menu(tg_id: int, target):
     """Вспомогательная функция для отображения магазина."""
     user = get_user(tg_id)
     if not user or not user.get('equipped_pet_id'):
-        await target.answer("Сначала выбери цвет своего стикмана!", reply_markup=main_menu_keyboard)
+        await target.answer("Сначала выбери цвет своего стикмана!", reply_markup=get_main_keyboard(tg_id))
         return
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -588,61 +779,10 @@ async def create_sticker_pack_handler(callback: CallbackQuery):
         logger.error(f"Sticker error: {e}")
         await callback.message.answer("⚠️ Ошибка создания пака. Попробуй позже.")
 
-@dp.message(F.text == "🐾 Посмотреть на питомца")
-async def handle_show_pet(message: Message):
-    image = generate_pet_image(message.from_user.id)
-    if image:
-        bio = io.BytesIO()
-        image.save(bio, format='PNG')
-        bio.seek(0)
-        photo_file = BufferedInputFile(file=bio.read(), filename="my_pet.png")
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎨 Создать стикерпак (20 вайбов)", callback_data="create_sticker_pack")]
-        ])
-        await message.answer_photo(
-            photo=photo_file, 
-            caption="Твой уникальный стикман! 🎨\n\nТы можешь сделать из него свой стикерпак для чатов!",
-            reply_markup=keyboard
-        )
-    else:
-        await message.answer("Сначала выбери базового питомца в магазине!", reply_markup=main_menu_keyboard)
-
-@dp.message(F.text == "💰 Баланс")
-async def handle_balance(message: Message):
-    tg_id = message.from_user.id
-    user = get_user(tg_id)
-    if user:
-        text = f"💰 Твой баланс: {user['balance']} {vibes_word(user['balance'])}"
-        
-        # Показываем рейтинг команд
-        teams_rating = get_teams_rating()
-        if teams_rating:
-            text += "\n\n🏆 **Рейтинг команд:**\n"
-            for i, team in enumerate(teams_rating, 1):
-                medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-                text += f"{medal} {team['name']}: {team['balance']} {vibes_word(team['balance'])}\n"
-        
-        await message.answer(text, parse_mode="Markdown")
-    else:
-        await message.answer("Сначала зарегистрируйся через /start", reply_markup=main_menu_keyboard)
-
-@dp.message(F.text == "✨ Получить вайб")
-async def handle_claim_vibe(message: Message):
-    tg_id = message.from_user.id
-    user = get_user(tg_id)
-    if user:
-        new_balance, team_name = add_vibes(tg_id, 1)
-        text = f"Тебе +1 вайб! ✨\nТвой баланс: {new_balance} {vibes_word(new_balance)}"
-        if team_name:
-            text += f"\n\n🎯 Твоя команда **{team_name}** тоже получила +1 вайб!"
-        await message.answer(text, parse_mode="Markdown")
-    else:
-        await message.answer("Сначала зарегистрируйся через /start", reply_markup=main_menu_keyboard)
-
 # --- FALLBACK ---
 @dp.message()
 async def catch_all_messages(message: Message, state: FSMContext):
-    await message.answer("Я тебя не понимаю. Используй кнопки меню 👇", reply_markup=main_menu_keyboard)
+    await message.answer("Я тебя не понимаю. Используй кнопки меню 👇", reply_markup=get_main_keyboard(message.from_user.id))
 
 @dp.callback_query()
 async def catch_all_callbacks(callback: CallbackQuery):
