@@ -696,19 +696,28 @@ async def save_edit_hobbies(message: Message, state: FSMContext):
     await message.answer("✅ Хобби обновлены!", reply_markup=get_main_keyboard(message.from_user.id))
 
 # --- ОБРАБОТЧИКИ: МАГАЗИН ---
+async def edit_or_send_text(target, text: str, reply_markup=None, parse_mode=None):
+    """Универсальная функция: редактирует текст или удаляет фото и отправляет новое сообщение."""
+    if target.photo:
+        # Это фото-сообщение, удаляем и отправляем новое текстовое
+        await target.delete()
+        await target.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    else:
+        # Это текстовое сообщение, просто редактируем
+        await target.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+
 async def show_shop_menu(tg_id: int, target):
     """Вспомогательная функция для отображения магазина."""
     user = get_user(tg_id)
     if not user or not user.get('equipped_pet_id'):
-        await target.answer("Сначала выбери цвет своего стикмана!", reply_markup=get_main_keyboard(tg_id))
+        await edit_or_send_text(target, "Сначала выбери цвет своего стикмана!", reply_markup=get_main_keyboard(tg_id))
         return
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎩 Голова", callback_data="shop_cat_head"), 
          InlineKeyboardButton(text="👕 Верх", callback_data="shop_cat_top"), 
          InlineKeyboardButton(text="👖 Низ", callback_data="shop_cat_bottom")]
     ])
-    await target.answer("🛒 **Магазин одежды**\n\nВыбери категорию:", reply_markup=kb, parse_mode="Markdown")
+    await edit_or_send_text(target, "🛒 **Магазин одежды**\n\nВыбери категорию:", reply_markup=kb, parse_mode="Markdown")
 
 @dp.message(F.text == "🛒 Магазин")
 async def shop_menu(message: Message):
@@ -716,13 +725,7 @@ async def shop_menu(message: Message):
 
 @dp.callback_query(F.data == "shop_back")
 async def shop_back(callback: CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🎩 Голова", callback_data="shop_cat_head"), 
-             InlineKeyboardButton(text="👕 Верх", callback_data="shop_cat_top"), 
-             InlineKeyboardButton(text="👖 Низ", callback_data="shop_cat_bottom")]
-        ])
-    await callback.message.edit_text("🛒 **Магазин одежды**\n\nВыбери категорию:", reply_markup=kb, parse_mode="Markdown")
-    # await show_shop_menu(callback.from_user.id, callback.message)
+    await show_shop_menu(callback.from_user.id, callback.message)
     await callback.answer()
     
 @dp.callback_query(F.data.startswith("shop_cat_"))
@@ -730,32 +733,24 @@ async def shop_category(callback: CallbackQuery):
     category = callback.data.replace("shop_cat_", "")
     response = supabase.table("items").select("group_name").eq("category", category).execute()
     groups = list(set([item['group_name'] for item in response.data if item.get('group_name')]))
-    
     kb = [[InlineKeyboardButton(text=g, callback_data=f"shop_group_{category}_{g}")] for g in groups]
     kb.append([InlineKeyboardButton(text="🔙 Назад в магазин", callback_data="shop_back")])
-    
-    # Удаляем текущее сообщение (может быть фото) и отправляем новое
-    await callback.message.delete()
-    await callback.message.answer(f"🛒 Категория: {category}\nВыбери предмет:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await edit_or_send_text(callback.message, f"🛒 Категория: {category}\nВыбери предмет:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     await callback.answer()
 
 
 @dp.callback_query(F.data.startswith("shop_group_"))
 async def shop_item(callback: CallbackQuery):
-    parts = callback.data.replace("shop_group_", "").split("_", 1)
+    parts = callback.data.replace("shop_group_", "", 1).split("_", 1)
     category, group_name = parts[0], parts[1]
     items = supabase.table("items").select("*").eq("category", category).eq("group_name", group_name).execute().data
     inventory = get_user_inventory(callback.from_user.id)
-    
     kb = []
     for item in items:
         status = "✅ В инвентаре" if item['id'] in inventory else f"{item['price']} вайбов"
         kb.append([InlineKeyboardButton(text=f"{item['name']} — {status}", callback_data=f"shop_color_{item['id']}")])
     kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data=f"shop_cat_{category}")])
-    
-    # Удаляем текущее сообщение (может быть фото) и отправляем новое
-    await callback.message.delete()
-    await callback.message.answer(f"🛒 {group_name}\nВыбери цвет:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await edit_or_send_text(callback.message, f"🛒 {group_name}\nВыбери цвет:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("shop_color_"))
