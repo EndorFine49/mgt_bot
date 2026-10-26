@@ -587,9 +587,9 @@ async def roulette_menu(callback: CallbackQuery):
     tg_id = callback.from_user.id
     user = get_user(tg_id)
     
-    today = datetime.now().date()
-    free_available = user.get('free_spin_date') != today
-    paid_available = user.get('paid_spin_date') != today
+    today_str = datetime.now().date().isoformat()
+    free_available = user.get('free_spin_date') != today_str
+    paid_available = user.get('paid_spin_date') != today_str
     
     text = "🎰 **Рулетка**\n\n"
     text += f"💰 Твой баланс: {user['balance']} {vibes_word(user['balance'])}\n\n"
@@ -616,12 +616,12 @@ async def roulette_free(callback: CallbackQuery):
     tg_id = callback.from_user.id
     user = get_user(tg_id)
     
-    today = datetime.now().date()
-    if user.get('free_spin_date') == today:
+    today_str = datetime.now().date().isoformat()  # Формат YYYY-MM-DD
+    if user.get('free_spin_date') == today_str:
         return await callback.answer("Бесплатная попытка уже использована сегодня!", show_alert=True)
     
     # Обновляем дату попытки
-    update_user(tg_id, {"free_spin_date": today})
+    update_user(tg_id, {"free_spin_date": today_str})
     
     # Генерируем выигрыш от 1 до 50
     win_amount = random.randint(1, 5)
@@ -655,8 +655,8 @@ async def roulette_paid(callback: CallbackQuery):
     tg_id = callback.from_user.id
     user = get_user(tg_id)
     
-    today = datetime.now().date()
-    if user.get('paid_spin_date') == today:
+    today_str = datetime.now().date().isoformat()  # Формат YYYY-MM-DD
+    if user.get('paid_spin_date') == today_str:
         return await callback.answer("Платная попытка уже использована сегодня!", show_alert=True)
     
     if user['balance'] < 5:
@@ -665,7 +665,7 @@ async def roulette_paid(callback: CallbackQuery):
     new_balance_after_bet, _ = add_vibes(tg_id, -5)
     
     # Обновляем дату попытки
-    update_user(tg_id, {"paid_spin_date": today})
+    update_user(tg_id, {"paid_spin_date": today_str})
     win_amount = random.randint(1, 15)
     final_balance, team_name = add_vibes(tg_id, win_amount)
     
