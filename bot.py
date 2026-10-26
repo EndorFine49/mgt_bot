@@ -638,12 +638,16 @@ async def roulette_free(callback: CallbackQuery):
     
     dice_value = dice_result.dice.value
     
-    # Генерируем выигрыш от 1 до 50 на основе результата dice
-    win_amount = (dice_value % 5) + 1
+    if dice_value in [1, 22, 43]:
+        win_amount = 5
+        result_text = "🎉 ДЖЕКПОТ!"
+    else:
+        win_amount = (dice_value % 4) + 1
+        result_text = "🎰 В следующий раз повезёт"
     
     new_balance, team_name = add_vibes(tg_id, win_amount)
     
-    text = f"🎉 **Поздравляем!**\n\n"
+    text = f"{result_text}\n\n"
     text += f"Ты выиграл **{win_amount} {vibes_word(win_amount)}**!\n\n"
     text += f"💰 Твой новый баланс: {new_balance} {vibes_word(new_balance)}"
     
@@ -679,13 +683,19 @@ async def roulette_paid(callback: CallbackQuery):
     
     await dice_msg.delete()
     await asyncio.sleep(1)
-    dice_value = dice_result.dice.value
 
-    win_amount = (dice_value % 15) + 1
+    dice_value = dice_result.dice.value
+    if dice_value in [1, 22, 43]:
+        win_amount = 15
+        result_text = "💎 ДЖЕКПОТ!"
+    else:
+        win_amount = (dice_value % 10) + 1
+        result_text = "💎 Завтра повезёт"
+    
     final_balance, team_name = add_vibes(tg_id, win_amount)
     net_win = win_amount - 10
     
-    text = f"💎 **Поздравляем!**\n\n"
+    text = f"{result_text}\n\n"
     text += f"Ставка: 5 вайбов\n"
     text += f"Выигрыш: {win_amount} {vibes_word(win_amount)}\n"
     text += f"Чистый выигрыш: **{net_win} {vibes_word(net_win)}**\n\n"
