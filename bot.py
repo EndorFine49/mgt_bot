@@ -348,7 +348,14 @@ async def profile_back(callback: CallbackQuery):
         [InlineKeyboardButton(text="💰 Баланс", callback_data="profile_balance"),
          InlineKeyboardButton(text="🐾 Мой питомец", callback_data="profile_pet")]
     ])
-    await callback.message.edit_text("👤 **Мой профиль**\n\nВыбери раздел:", reply_markup=kb, parse_mode="Markdown")
+    
+    # Удаляем текущее сообщение (текст или фото) и отправляем меню заново
+    await callback.message.delete()
+    await callback.message.answer(
+        "👤 **Мой профиль**\n\nВыбери раздел:",
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
     await callback.answer()
 
 @dp.callback_query(F.data == "claim_vibe_inline")
