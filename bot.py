@@ -643,7 +643,7 @@ async def roulette_free(callback: CallbackQuery):
         result_text = "🎉 ДЖЕКПОТ!"
     else:
         win_amount = (dice_value % 4) + 1
-        result_text = "🎰 В следующий раз повезёт"
+        result_text = "🎰 В следующий раз повезёт больше!"
     
     new_balance, team_name = add_vibes(tg_id, win_amount)
     
@@ -690,10 +690,10 @@ async def roulette_paid(callback: CallbackQuery):
         result_text = "💎 ДЖЕКПОТ!"
     else:
         win_amount = (dice_value % 10) + 1
-        result_text = "💎 Завтра повезёт"
+        result_text = "💎 Завтра повезёт больше!"
     
     final_balance, team_name = add_vibes(tg_id, win_amount)
-    net_win = win_amount - 10
+    net_win = win_amount - 5
     
     text = f"{result_text}\n\n"
     text += f"Ставка: 5 вайбов\n"
