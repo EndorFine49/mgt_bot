@@ -497,6 +497,87 @@ async def broadcast_mode(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(text, parse_mode="Markdown")
     await callback.answer()
 
+# --- ОБРАБОТЧИКИ: РАССЫЛКА (Продолжение) ---
+
+@dp.message(Broadcast.waiting_for_text)
+async def process_broadcast_text(message: Message, state: FSMContext):
+    await state.update_data(text=message.text)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Да, добавить", callback_data="broadcast_btn_yes"), 
+         InlineKeyboardButton(text="Нет, без кнопки", callback_data="broadcast_btn_no")]
+    ])
+    await message.answer("Добавить под сообщением Inline-кнопку (например, 'Перейти к анкете')?", reply_markup=kb)
+    await state.set_state(Broadcast.waiting_for_button_choice)
+
+@dp.callback_query(F.data.in_(["broadcast_btn_yes", "broadcast_btn_no"]))
+async def process_button_choice(callback: CallbackQuery, state: FSMContext):
+    if callback.data == "broadcast_btn_yes":
+        await callback.message.edit_text("Отлично! Напиши текст для кнопки (например: 'Открыть анкету'):")
+        await state.set_state(Broadcast.waiting_for_button_text)
+    else:
+        await callback.message.edit_text("Понял, запускаю рассылку без кнопки...")
+        is_test = (await state.get_data()).get("is_test", False)
+        await process_broadcast(callback.message.chat.id, state, is_test)
+    await callback.answer()
+
+@dp.message(Broadcast.waiting_for_button_text)
+async def process_button_text(message: Message, state: FSMContext):
+    await state.update_data(button_text=message.text)
+    await message.answer("Теперь пришли ссылку (URL), куда должна вести кнопка (например, https://t.me/your_bot):")
+    await state.set_state(Broadcast.waiting_for_button_url)
+
+@dp.message(Broadcast.waiting_for_button_url)
+async def process_button_url(message: Message, state: FSMContext):
+    if not message.text.startswith("http"):
+        return await message.answer("Ссылка должна начинаться с http:// или https://. Попробуй еще раз:")
+    
+    await state.update_data(button_url=message.text)
+    await message.answer("Принял! Запускаю рассылку с кнопкой...")
+    is_test = (await state.get_data()).get("is_test", False)
+    await process_broadcast(message.chat.id, state, is_test)
+
+async def send_broadcast_message(chat_id: int, text: str, button_text: str = None, button_url: str = None):
+    """Отправляет одно сообщение с учетом кнопок."""
+    keyboard = None
+    if button_text and button_url:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=button_text, url=button_url)
+        ]])
+    await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="Markdown")
+
+async def process_broadcast(chat_id: int, state: FSMContext, is_test: bool = False):
+    """Логика массовой отправки."""
+    data = await state.get_data()
+    text = data.get("text", "")
+    btn_text = data.get("button_text")
+    btn_url = data.get("button_url")
+    
+    await state.clear()
+    
+    if is_test:
+        await bot.send_message(chat_id, f"🧪 *ТЕСТОВАЯ РАССЫЛКА*\n\n{text}", parse_mode="Markdown", 
+                               reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=btn_text, url=btn_url)]]) if btn_text else None)
+        await bot.send_message(chat_id, "✅ Тестовое сообщение отправлено!")
+        return
+
+    await bot.send_message(chat_id, "🚀 Запускаю рассылку... Это может занять некоторое время.")
+    
+    users = get_all_users()
+    success_count = 0
+    error_count = 0
+    
+    for user in users:
+        try:
+            await send_broadcast_message(user['tg_id'], text, btn_text, btn_url)
+            success_count += 1
+            await asyncio.sleep(0.05) # Задержка 50мс для безопасности
+        except Exception as e:
+            error_count += 1
+            logger.error(f"Ошибка отправки пользователю {user['tg_id']}: {e}")
+            
+    report = f"✅ Рассылка завершена!\n\n📊 Статистика:\n• Доставлено: {success_count}\n• Ошибок: {error_count}\n• Всего пользователей: {len(users)}"
+    await bot.send_message(chat_id, report)
+
 # --- ОБРАБОТЧИКИ: АНКЕТА ---
 @dp.callback_query(F.data == "start_survey")
 async def start_survey(callback: CallbackQuery, state: FSMContext):
