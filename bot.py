@@ -682,7 +682,7 @@ async def roulette_paid(callback: CallbackQuery):
     dice_result = await bot.send_dice(chat_id=tg_id, emoji="🎰")
     
     await dice_msg.delete()
-    await asyncio.sleep(1)
+    await asyncio.sleep(2)
 
     dice_value = dice_result.dice.value
     if dice_value in [1, 22, 43]:
