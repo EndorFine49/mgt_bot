@@ -10,7 +10,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw, ImageFont
@@ -697,14 +697,19 @@ async def save_edit_hobbies(message: Message, state: FSMContext):
 
 # --- ОБРАБОТЧИКИ: МАГАЗИН ---
 async def edit_or_send_text(target, text: str, reply_markup=None, parse_mode=None):
-    """Универсальная функция: редактирует текст или удаляет фото и отправляет новое сообщение."""
-    if target.photo:
-        # Это фото-сообщение, удаляем и отправляем новое текстовое
-        await target.delete()
+    is_bot_message = getattr(target, 'from_user', None) and getattr(target.from_user, 'is_bot', False)
+    
+    if not is_bot_message:
         await target.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
     else:
-        # Это текстовое сообщение, просто редактируем
-        await target.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        try:
+            await target.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except TelegramBadRequest:
+            try:
+                await target.delete()
+            except Exception:
+                pass 
+            await target.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 async def show_shop_menu(tg_id: int, target):
     """Вспомогательная функция для отображения магазина."""
