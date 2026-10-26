@@ -13,6 +13,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 
 # --- НАСТРОЙКИ И ЛОГИРОВАНИЕ ---
@@ -401,7 +402,8 @@ async def handle_tasks(message: Message):
         return await message.answer("Сначала зарегистрируйся через /start", reply_markup=get_main_keyboard(tg_id))
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")]
+        [InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")],
+        [InlineKeyboardButton(text="🎰 Рулетка", callback_data="roulette_menu")]
     ])
     await message.answer("📋 **Задания**\n\nВыполняй задания и получай вайбы!", reply_markup=kb, parse_mode="Markdown")
 
@@ -577,6 +579,129 @@ async def process_broadcast(chat_id: int, state: FSMContext, is_test: bool = Fal
             
     report = f"✅ Рассылка завершена!\n\n📊 Статистика:\n• Доставлено: {success_count}\n• Ошибок: {error_count}\n• Всего пользователей: {len(users)}"
     await bot.send_message(chat_id, report)
+
+# --- ОБРАБОТЧИКИ: РУЛЕТКА ---
+
+@dp.callback_query(F.data == "roulette_menu")
+async def roulette_menu(callback: CallbackQuery):
+    tg_id = callback.from_user.id
+    user = get_user(tg_id)
+    
+    today = datetime.now().date()
+    free_available = user.get('free_spin_date') != today
+    paid_available = user.get('paid_spin_date') != today
+    
+    text = "🎰 **Рулетка**\n\n"
+    text += f"💰 Твой баланс: {user['balance']} {vibes_word(user['balance'])}\n\n"
+    
+    kb = []
+    
+    if free_available:
+        kb.append([InlineKeyboardButton(text="🆓 Бесплатная попытка (1-5 вайбов)", callback_data="roulette_free")])
+    else:
+        kb.append([InlineKeyboardButton(text="✅ Бесплатная попытка использована", callback_data="noop")])
+    
+    if paid_available:
+        kb.append([InlineKeyboardButton(text="💎 Платная попытка за 5 вайбов (1-15 вайбов)", callback_data="roulette_paid")])
+    else:
+        kb.append([InlineKeyboardButton(text="✅ Платная попытка использована", callback_data="noop")])
+    
+    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="tasks_back")])
+    
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "roulette_free")
+async def roulette_free(callback: CallbackQuery):
+    tg_id = callback.from_user.id
+    user = get_user(tg_id)
+    
+    today = datetime.now().date()
+    if user.get('free_spin_date') == today:
+        return await callback.answer("Бесплатная попытка уже использована сегодня!", show_alert=True)
+    
+    # Обновляем дату попытки
+    update_user(tg_id, {"free_spin_date": today})
+    
+    # Генерируем выигрыш от 1 до 50
+    win_amount = random.randint(1, 5)
+    
+    # Начисляем вайбы через add_vibes (команда тоже получит)
+    new_balance, team_name = add_vibes(tg_id, win_amount)
+    
+    # Анимация рулетки
+    await callback.message.edit_text("🎰 Крутим рулетку...")
+    await asyncio.sleep(1)
+    await callback.message.edit_text("🎰 Крутим рулетку... 🎲")
+    await asyncio.sleep(1)
+    
+    text = f"🎉 **Поздравляем!**\n\n"
+    text += f"Ты выиграл **{win_amount} {vibes_word(win_amount)}**!\n\n"
+    text += f"💰 Твой новый баланс: {new_balance} {vibes_word(new_balance)}"
+    
+    if team_name:
+        text += f"\n\n🎯 Твоя команда **{team_name}** тоже получила +{win_amount} {vibes_word(win_amount)}!"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎰 Вернуться к рулетке", callback_data="roulette_menu")],
+        [InlineKeyboardButton(text="⬅️ Назад к заданиям", callback_data="tasks_back")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "roulette_paid")
+async def roulette_paid(callback: CallbackQuery):
+    tg_id = callback.from_user.id
+    user = get_user(tg_id)
+    
+    today = datetime.now().date()
+    if user.get('paid_spin_date') == today:
+        return await callback.answer("Платная попытка уже использована сегодня!", show_alert=True)
+    
+    if user['balance'] < 5:
+        return await callback.answer("Не хватает вайбов! Нужно 5 🪙", show_alert=True)
+    
+    new_balance_after_bet, _ = add_vibes(tg_id, -5)
+    
+    # Обновляем дату попытки
+    update_user(tg_id, {"paid_spin_date": today})
+    win_amount = random.randint(1, 15)
+    final_balance, team_name = add_vibes(tg_id, win_amount)
+    
+    # Анимация рулетки
+    await callback.message.edit_text("💎 Крутим рулетку...")
+    await asyncio.sleep(1)
+    await callback.message.edit_text("💎 Крутим рулетку... 🎲")
+    await asyncio.sleep(1)
+    
+    net_win = win_amount - 5  # Чистый выигрыш (минус ставка)
+    
+    text = f"💎 **Поздравляем!**\n\n"
+    text += f"Ставка: 5 вайбов\n"
+    text += f"Выигрыш: {win_amount} {vibes_word(win_amount)}\n"
+    text += f"Чистый выигрыш: **{net_win} {vibes_word(net_win)}**\n\n"
+    text += f"💰 Твой новый баланс: {final_balance} {vibes_word(final_balance)}"
+    
+    if team_name:
+        text += f"\n\n🎯 Твоя команда **{team_name}** тоже получила +{win_amount} {vibes_word(win_amount)}!"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎰 Вернуться к рулетке", callback_data="roulette_menu")],
+        [InlineKeyboardButton(text="⬅️ Назад к заданиям", callback_data="tasks_back")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "tasks_back")
+async def tasks_back(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")],
+        [InlineKeyboardButton(text="🎰 Рулетка", callback_data="roulette_menu")]
+    ])
+    await callback.message.edit_text("📋 **Задания**\n\nВыполняй задания и получай вайбы!", reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
 
 # --- ОБРАБОТЧИКИ: АНКЕТА ---
 @dp.callback_query(F.data == "start_survey")
