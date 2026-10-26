@@ -78,7 +78,7 @@ class Survey(StatesGroup):
     editing_birthday = State()
     editing_study_group = State()
     editing_hobbies = State()
-    
+
 class Broadcast(StatesGroup):
     waiting_for_text = State()
     waiting_for_button_choice = State()
@@ -635,8 +635,13 @@ async def shop_menu(message: Message):
 
 @dp.callback_query(F.data == "shop_back")
 async def shop_back(callback: CallbackQuery):
-    await callback.message.delete()
-    await show_shop_menu(callback.from_user.id, callback.message)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎩 Голова", callback_data="shop_cat_head"), 
+             InlineKeyboardButton(text="👕 Верх", callback_data="shop_cat_top"), 
+             InlineKeyboardButton(text="👖 Низ", callback_data="shop_cat_bottom")]
+        ])
+    await callback.message.edit_text("🛒 **Магазин одежды**\n\nВыбери категорию:", reply_markup=kb, parse_mode="Markdown")
+    # await show_shop_menu(callback.from_user.id, callback.message)
     await callback.answer()
     
 @dp.callback_query(F.data.startswith("shop_cat_"))
