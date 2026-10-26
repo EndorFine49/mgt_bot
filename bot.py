@@ -5,7 +5,7 @@ import asyncio
 import random
 import io
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile, InputSticker
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile, InputSticker, InputMediaPhoto
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -324,7 +324,8 @@ async def profile_balance(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "profile_pet")
 async def profile_pet(callback: CallbackQuery):
-    image = generate_pet_image(callback.from_user.id)
+    tg_id = callback.from_user.id
+    image = generate_pet_image(tg_id)
     if image:
         bio = io.BytesIO()
         image.save(bio, format='PNG')
@@ -334,13 +335,15 @@ async def profile_pet(callback: CallbackQuery):
             [InlineKeyboardButton(text="🎨 Создать стикерпак (20 вайбов)", callback_data="create_sticker_pack")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile_back")]
         ])
-        await callback.message.answer_photo(
-            photo=photo_file,
-            caption="Твой уникальный стикман! 🎨",
+        
+        # Плавно заменяем текст на фото в том же сообщении
+        await callback.message.edit_media(
+            media=InputMediaPhoto(media=photo_file, caption="Твой уникальный стикман! 🎨"),
             reply_markup=kb
         )
     else:
         await callback.answer("Сначала выбери базового питомца в магазине!", show_alert=True)
+    await callback.answer()
 
 @dp.callback_query(F.data == "profile_back")
 async def profile_back(callback: CallbackQuery):
@@ -349,9 +352,8 @@ async def profile_back(callback: CallbackQuery):
          InlineKeyboardButton(text="🐾 Мой питомец", callback_data="profile_pet")]
     ])
     
-    # Удаляем текущее сообщение (текст или фото) и отправляем меню заново
-    await callback.message.delete()
-    await callback.message.answer(
+    # edit_text отлично работает и для возврата от фото к тексту
+    await callback.message.edit_text(
         "👤 **Мой профиль**\n\nВыбери раздел:",
         reply_markup=kb,
         parse_mode="Markdown"
@@ -383,19 +385,9 @@ async def handle_tasks(message: Message):
         return await message.answer("Сначала зарегистрируйся через /start", reply_markup=get_main_keyboard(tg_id))
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="tasks_back")]
+        [InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")]
     ])
     await message.answer("📋 **Задания**\n\nВыполняй задания и получай вайбы!", reply_markup=kb, parse_mode="Markdown")
-
-@dp.callback_query(F.data == "tasks_back")
-async def tasks_back(callback: CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="tasks_back")]
-    ])
-    await callback.message.edit_text("📋 **Задания**\n\nВыполняй задания и получай вайбы!", reply_markup=kb, parse_mode="Markdown")
-    await callback.answer()
 
 @dp.message(F.text == "🛠 Админ-панель")
 async def show_admin_panel(message: Message):
@@ -481,9 +473,11 @@ async def broadcast_mode(callback: CallbackQuery, state: FSMContext):
     await state.update_data(is_test=is_test)
     await state.set_state(Broadcast.waiting_for_text)
     
-    text = ("🧪 **Тестовая рассылка**\n\nПришли текст сообщения, оно придёт только тебе.\n\nОтмена — /cancel"
-            if is_test else
-            "📢 **Режим рассылки**\n\nПришли текст сообщения, который нужно разослать всем пользователям.\n\n_Поддерживается Markdown: *жирный*, _курсив_, `код`_\n\nОтмена — /cancel")
+    if is_test:
+        text = "🧪 **Тестовая рассылка**\n\nПришли текст сообщения, оно придёт только тебе.\n\nОтмена — /cancel"
+    else:
+        text = "📢 **Режим рассылки**\n\nПришли текст сообщения, который нужно разослать всем пользователям.\n\n_Поддерживается Markdown: *жирный*, _курсив_, `код`_\n\nОтмена — /cancel"
+        
     await callback.message.edit_text(text, parse_mode="Markdown")
     await callback.answer()
 
@@ -775,7 +769,7 @@ async def create_sticker_pack_handler(callback: CallbackQuery):
     pack_name = f"mgt_pet_{tg_id}_{random.randint(1000, 9999)}_by_{BOT_USERNAME}"
     try:
         await bot.create_new_sticker_set(user_id=tg_id, name=pack_name, title=f"Стикеры {user['first_name']}", stickers=input_stickers, sticker_type="regular")
-        new_balance = add_vibes(tg_id, -20)
+        new_balance, _ = add_vibes(tg_id, -20)
         text = (f"🎉 Твой личный стикерпак готов!\n"
                 f"С баланса списано 20 вайбов.\n"
                 f"Твой новый баланс: {new_balance} {vibes_word(new_balance)}\n\n"
