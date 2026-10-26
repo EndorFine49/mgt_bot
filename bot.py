@@ -78,7 +78,12 @@ class Survey(StatesGroup):
     editing_birthday = State()
     editing_study_group = State()
     editing_hobbies = State()
-
+    
+class Broadcast(StatesGroup):
+    waiting_for_text = State()
+    waiting_for_button_choice = State()
+    waiting_for_button_text = State()
+    waiting_for_button_url = State()
 # --- БАЗА ДАННЫХ ---
 def get_user(tg_id: int):
     response = supabase.table("users").select("*").eq("tg_id", tg_id).execute()
@@ -333,10 +338,9 @@ async def profile_pet(callback: CallbackQuery):
         photo_file = BufferedInputFile(file=bio.read(), filename="my_pet.png")
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎨 Создать стикерпак (20 вайбов)", callback_data="create_sticker_pack")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile_back")]
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile_back_image")]
         ])
         
-        # Плавно заменяем текст на фото в том же сообщении
         await callback.message.edit_media(
             media=InputMediaPhoto(media=photo_file, caption="Твой уникальный стикман! 🎨"),
             reply_markup=kb
@@ -351,9 +355,21 @@ async def profile_back(callback: CallbackQuery):
         [InlineKeyboardButton(text="💰 Баланс", callback_data="profile_balance"),
          InlineKeyboardButton(text="🐾 Мой питомец", callback_data="profile_pet")]
     ])
-    
-    # edit_text отлично работает и для возврата от фото к тексту
     await callback.message.edit_text(
+        "👤 **Мой профиль**\n\nВыбери раздел:",
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "profile_back_image")
+async def profile_back(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Баланс", callback_data="profile_balance"),
+         InlineKeyboardButton(text="🐾 Мой питомец", callback_data="profile_pet")]
+    ])
+    await callback.message.delete()
+    await callback.message.answer(
         "👤 **Мой профиль**\n\nВыбери раздел:",
         reply_markup=kb,
         parse_mode="Markdown"
