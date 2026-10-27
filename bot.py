@@ -13,7 +13,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from supabase import create_client, Client
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
 
 # --- НАСТРОЙКИ И ЛОГИРОВАНИЕ ---
@@ -85,6 +85,10 @@ class Broadcast(StatesGroup):
     waiting_for_button_choice = State()
     waiting_for_button_text = State()
     waiting_for_button_url = State()
+
+class Goal(StatesGroup):
+    waiting_for_text = State()
+
 # --- БАЗА ДАННЫХ ---
 def get_user(tg_id: int):
     response = supabase.table("users").select("*").eq("tg_id", tg_id).execute()
@@ -155,6 +159,34 @@ def buy_item(user_tg_id: int, item_id: int, price: int):
         "item_id": item_id
     }).execute()
     return True, "Покупка успешна!"
+
+def get_week_boundaries(date=None):
+    if date is None:
+        date = datetime.now().date()
+    week_start = date - timedelta(days=date.weekday())
+    week_end = week_start + timedelta(days=6)
+    return week_start, week_end
+
+def get_user_goal(tg_id: int, week_start):
+    """Возвращает цель пользователя на указанную неделю."""
+    response = supabase.table("goals").select("*").eq("user_tg_id", tg_id).eq("week_start", week_start.isoformat()).execute()
+    return response.data[0] if response.data else None
+
+def set_goal(tg_id: int, text: str, week_start, week_end):
+    """Создаёт цель на неделю."""
+    response = supabase.table("goals").insert({
+        "user_tg_id": tg_id,
+        "week_start": week_start.isoformat(),
+        "week_end": week_end.isoformat(),
+        "text": text,
+        "completed": None,
+        "reward_claimed": False
+    }).execute()
+    return response.data[0] if response.data else None
+
+def update_goal_status(goal_id: int, completed: bool):
+    """Отмечает выполнение цели."""
+    supabase.table("goals").update({"completed": completed}).eq("id", goal_id).execute()
 
 # --- ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ---
 def generate_pet_image(user_tg_id: int):
@@ -401,11 +433,68 @@ async def handle_tasks(message: Message):
     if not user:
         return await message.answer("Сначала зарегистрируйся через /start", reply_markup=get_main_keyboard(tg_id))
     
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")],
-        [InlineKeyboardButton(text="🎰 Рулетка", callback_data="roulette_menu")]
-    ])
-    await message.answer("📋 **Задания**\n\nВыполняй задания и получай вайбы!", reply_markup=kb, parse_mode="Markdown")
+    text, kb = await build_tasks_view(tg_id)
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
+
+async def build_tasks_view(tg_id: int):
+    """Строит текст и клавиатуру для раздела 'Задания'."""
+    today = datetime.now().date()
+    is_sunday = today.weekday() == 6  
+    
+    current_week_start, current_week_end = get_week_boundaries(today)
+    current_goal = get_user_goal(tg_id, current_week_start)
+    
+    kb = []
+    text = "📋 **Задания**\n\n"
+    
+    if is_sunday:
+        if current_goal:
+            week_text = f"{current_week_start.strftime('%d.%m')} — {current_week_end.strftime('%d.%m')}"
+            
+            if current_goal.get('completed') is None:
+                text += f"🎯 **Воскресенье — время подвести итоги!**\n\n"
+                text += f"Твоя цель на неделю ({week_text}) была:\n"
+                text += f"«{current_goal['text']}»\n\n"
+                text += f"Удалось ли её выполнить?"
+                kb.append([
+                    InlineKeyboardButton(text="✅ Выполнено (+1 вайб)", callback_data=f"goal_complete_{current_goal['id']}_true"),
+                    InlineKeyboardButton(text="❌ Не выполнено", callback_data=f"goal_complete_{current_goal['id']}_false")
+                ])
+            elif current_goal.get('completed') is True:
+                text += f"🎉 **Цель на неделю ({week_text}) выполнена!**\n\n"
+                text += f"«{current_goal['text']}»\n\n"
+                text += f"Статус: ✅ Выполнено (+1 вайб начислен)"
+            else:  # False
+                text += f"💪 **Цель на неделю ({week_text}) не выполнена.**\n\n"
+                text += f"«{current_goal['text']}»\n\n"
+                text += f"Статус: ❌ Не выполнена\n"
+                text += f"В понедельник начнётся новая неделя — поставь новую цель!"
+        else:
+            # Воскресенье, но цели на эту неделю не было
+            week_text = f"{current_week_start.strftime('%d.%m')} — {current_week_end.strftime('%d.%m')}"
+            text += f"⚠️ **Воскресенье, а цели на эту неделю не было!**\n\n"
+            text += f"На этой неделе ({week_text}) ты не поставил цель, поэтому подводить итоги нечего.\n\n"
+            text += f"В понедельник не забудь поставить новую цель!"
+    else:
+        # Будний день (пн-сб)
+        if current_goal:
+            week_text = f"{current_week_start.strftime('%d.%m')} — {current_week_end.strftime('%d.%m')}"
+            text += f"🎯 **Моя цель на неделю ({week_text}):**\n"
+            text += f"«{current_goal['text']}»\n\n"
+            text += f"Статус: ⏳ В процессе\n\n"
+            text += f"Подвести итог можно будет в воскресенье."
+        else:
+            week_text = f"{current_week_start.strftime('%d.%m')} — {current_week_end.strftime('%d.%m')}"
+            text += f"🎯 **Цель на неделю ({week_text}):**\n\n"
+            text += f"Ты ещё не поставил цель на эту неделю!\n\n"
+            text += f"Поставь цель сейчас и подведи итог в воскресенье."
+            kb.append([InlineKeyboardButton(text="🎯 Поставить цель", callback_data="goal_set")])
+    
+    text += "\n\n"
+    kb.append([InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")])
+    kb.append([InlineKeyboardButton(text="🎰 Рулетка", callback_data="roulette_menu")])
+    
+    return text, kb
 
 @dp.message(F.text == "🛠 Админ-панель")
 async def show_admin_panel(message: Message):
@@ -719,6 +808,112 @@ async def tasks_back(callback: CallbackQuery):
         [InlineKeyboardButton(text="🎰 Рулетка", callback_data="roulette_menu")]
     ])
     await callback.message.edit_text("📋 **Задания**\n\nВыполняй задания и получай вайбы!", reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+# --- ОБРАБОТЧИКИ: ЛИЧНЫЕ ЦЕЛИ ---
+@dp.message(Goal.waiting_for_text)
+async def goal_save(message: Message, state: FSMContext):
+    # В воскресенье ставить новую цель нельзя
+    today = datetime.now().date()
+    if today.weekday() == 6:
+        await state.clear()
+        return await message.answer(
+            "⚠️ В воскресенье ставить новую цель нельзя — это день подведения итогов!\n"
+            "Приходи в понедельник.",
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
+    
+    tg_id = message.from_user.id
+    text = message.text.strip()
+    
+    if len(text) < 3 or len(text) > 200:
+        return await message.answer("Цель должна быть от 3 до 200 символов. Попробуй ещё раз:")
+    
+    week_start, week_end = get_week_boundaries(today)
+    
+    # Проверяем, есть ли уже цель на эту неделю
+    existing = get_user_goal(tg_id, week_start)
+    if existing:
+        # ❌ Цель уже есть — не даём изменить
+        await state.clear()
+        return await message.answer(
+            "⚠️ Ты уже поставил цель на эту неделю и изменить её нельзя.\n\n"
+            f"Твоя цель: «{existing['text']}»\n\n"
+            "Работай над её выполнением! 💪",
+            reply_markup=get_main_keyboard(tg_id)
+        )
+    
+    # Создаём новую цель
+    set_goal(tg_id, text, week_start, week_end)
+    
+    await state.clear()
+    await message.answer(
+        f"✅ Цель сохранена!\n\n"
+        f"«{text}»\n\n"
+        f"Удачи в её выполнении! 💪\n"
+        f"Подвести итог нужно будет в воскресенье.",
+        reply_markup=get_main_keyboard(tg_id)
+    )
+
+@dp.callback_query(F.data.startswith("goal_complete_"))
+async def goal_complete(callback: CallbackQuery):
+    # Защита: подвести итог можно только в воскресенье
+    today = datetime.now().date()
+    if today.weekday() != 6:
+        return await callback.answer("Подвести итог можно только в воскресенье!", show_alert=True)
+    
+    # Разбираем callback_data: goal_complete_{id}_{true/false}
+    parts = callback.data.split("_")
+    goal_id = int(parts[2])
+    completed = parts[3] == "true"
+    
+    tg_id = callback.from_user.id
+    
+    # Проверяем, что цель относится к текущей неделе
+    current_week_start, _ = get_week_boundaries(today)
+    goal = supabase.table("goals").select("*").eq("id", goal_id).execute().data[0]
+    
+    if goal['week_start'] != current_week_start.isoformat():
+        return await callback.answer("Эта цель уже неактуальна.", show_alert=True)
+    
+    # Проверяем, не подведена ли уже
+    if goal.get('completed') is not None:
+        return await callback.answer("Эта цель уже подведена.", show_alert=True)
+    
+    # Обновляем статус
+    update_goal_status(goal_id, completed)
+    
+    if completed:
+        # Проверяем, не начисляли ли уже награду
+        if not goal.get('reward_claimed'):
+            new_balance, team_name = add_vibes(tg_id, 1)
+            supabase.table("goals").update({"reward_claimed": True}).eq("id", goal_id).execute()
+            
+            text = f"🎉 **Отлично! Цель выполнена!**\n\n"
+            text += f"Тебе +1 вайб за дисциплину."
+            if team_name:
+                text += f"\nТвоя команда **{team_name}** тоже получила +1 вайб!"
+            text += f"\n\n💰 Твой баланс: {new_balance} {vibes_word(new_balance)}"
+        else:
+            text = "🎉 Цель отмечена как выполненная!"
+    else:
+        text = (
+            "💪 Не расстраивайся!\n\n"
+            "В понедельник начнётся новая неделя — поставь новую цель и попробуй снова."
+        )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 К заданиям", callback_data="tasks_refresh")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "tasks_refresh")
+async def tasks_refresh(callback: CallbackQuery):
+    """Перерисовывает меню заданий."""
+    text, kb = await build_tasks_view(callback.from_user.id)
+    await callback.message.delete()
+    await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
     await callback.answer()
 
 # --- ОБРАБОТЧИКИ: АНКЕТА ---
