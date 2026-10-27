@@ -177,7 +177,6 @@ def set_goal(tg_id: int, text: str, week_start, week_end):
     response = supabase.table("goals").insert({
         "user_tg_id": tg_id,
         "week_start": week_start.isoformat(),
-        "week_end": week_end.isoformat(),
         "text": text,
         "completed": None,
         "reward_claimed": False
@@ -439,7 +438,8 @@ async def handle_tasks(message: Message):
 async def build_tasks_view(tg_id: int):
     """Строит текст и клавиатуру для раздела 'Задания'."""
     today = datetime.now().date()
-    is_sunday = today.weekday() == 6  
+    # is_sunday = today.weekday() == 6  
+    is_sunday = True #ВРЕМЕННО, раскомментить верхнюю строку
     
     current_week_start, current_week_end = get_week_boundaries(today)
     current_goal = get_user_goal(tg_id, current_week_start)
@@ -829,14 +829,15 @@ async def goal_set_prompt(callback: CallbackQuery, state: FSMContext):
 @dp.message(Goal.waiting_for_text)
 async def goal_save(message: Message, state: FSMContext):
     # В воскресенье ставить новую цель нельзя
-    today = datetime.now().date()
-    if today.weekday() == 6:
-        await state.clear()
-        return await message.answer(
-            "⚠️ В воскресенье ставить новую цель нельзя — это день подведения итогов!\n"
-            "Приходи в понедельник.",
-            reply_markup=get_main_keyboard(message.from_user.id)
-        )
+    # today = datetime.now().date()
+    # if today.weekday() == 6:
+    #     await state.clear()
+    #     return await message.answer(
+    #         "⚠️ В воскресенье ставить новую цель нельзя — это день подведения итогов!\n"
+    #         "Приходи в понедельник.",
+    #         reply_markup=get_main_keyboard(message.from_user.id)
+    #     )
+    # 
     
     tg_id = message.from_user.id
     text = message.text.strip()
@@ -874,8 +875,9 @@ async def goal_save(message: Message, state: FSMContext):
 async def goal_complete(callback: CallbackQuery):
     # Защита: подвести итог можно только в воскресенье
     today = datetime.now().date()
-    if today.weekday() != 6:
-        return await callback.answer("Подвести итог можно только в воскресенье!", show_alert=True)
+    # if today.weekday() != 6:
+    #     return await callback.answer("Подвести итог можно только в воскресенье!", show_alert=True)
+    #ВРЕМЕННО, раскомментить две строки сверху
     
     # Разбираем callback_data: goal_complete_{id}_{true/false}
     parts = callback.data.split("_")
