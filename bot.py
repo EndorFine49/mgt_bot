@@ -803,14 +803,29 @@ async def roulette_paid(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "tasks_back")
 async def tasks_back(callback: CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")],
-        [InlineKeyboardButton(text="🎰 Рулетка", callback_data="roulette_menu")]
-    ])
-    await callback.message.edit_text("📋 **Задания**\n\nВыполняй задания и получай вайбы!", reply_markup=kb, parse_mode="Markdown")
+    text, kb = await build_tasks_view(callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
     await callback.answer()
 
 # --- ОБРАБОТЧИКИ: ЛИЧНЫЕ ЦЕЛИ ---
+@dp.callback_query(F.data == "goal_set")
+async def goal_set_prompt(callback: CallbackQuery, state: FSMContext):
+    # В воскресенье ставить цель нельзя
+    today = datetime.now().date()
+    if today.weekday() == 6:
+        return await callback.answer("В воскресенье ставить цель нельзя — это день подведения итогов!", show_alert=True)
+    
+    await state.set_state(Goal.waiting_for_text)
+    await callback.message.edit_text(
+        "✍️ Напиши свою цель на эту неделю одним сообщением.\n\n"
+        "Например:\n"
+        "• «Прочитать 50 страниц книги»\n"
+        "• «Сделать 3 тренировки»\n"
+        "• «Выучить 20 новых слов»\n\n"
+        "Отмена — /cancel"
+    )
+    await callback.answer()
+    
 @dp.message(Goal.waiting_for_text)
 async def goal_save(message: Message, state: FSMContext):
     # В воскресенье ставить новую цель нельзя
