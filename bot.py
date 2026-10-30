@@ -94,6 +94,17 @@ class Broadcast(StatesGroup):
 class Goal(StatesGroup):
     waiting_for_text = State()
 
+class ContestCreate(StatesGroup):
+    waiting_for_text = State()
+    waiting_for_reward = State()
+    confirming = State()
+
+class ContestSubmit(StatesGroup):
+    waiting_for_photo = State()
+
+class ContestReview(StatesGroup):
+    reviewing = State()  # Храним contest_id и индекс текущего ответа
+
 # --- БАЗА ДАННЫХ ---
 def get_user(tg_id: int):
     response = supabase.table("users").select("*").eq("tg_id", tg_id).execute()
@@ -188,6 +199,47 @@ def update_goal_status(goal_id: int, completed: bool):
     """Отмечает выполнение цели."""
     supabase.table("goals").update({"completed": completed}).eq("id", goal_id).execute()
 
+# --- КОНКУРСЫ ---
+def create_contest(admin_tg_id: int, text: str, reward: int):
+    response = supabase.table("contests").insert({
+        "admin_tg_id": admin_tg_id,
+        "text": text,
+        "reward": reward,
+        "status": "active"
+    }).execute()
+    return response.data[0] if response.data else None
+
+def get_active_contests():
+    response = supabase.table("contests").select("*").eq("status", "active").order("created_at", desc=True).execute()
+    return response.data if response.data else []
+
+def get_contest(contest_id: int):
+    response = supabase.table("contests").select("*").eq("id", contest_id).execute()
+    return response.data[0] if response.data else None
+
+def finish_contest(contest_id: int):
+    supabase.table("contests").update({"status": "finished"}).eq("id", contest_id).execute()
+
+def save_submission(contest_id: int, user_tg_id: int, photo_file_id: str):
+    response = supabase.table("contest_submissions").insert({
+        "contest_id": contest_id,
+        "user_tg_id": user_tg_id,
+        "photo_file_id": photo_file_id,
+        "status": "pending"
+    }).execute()
+    return response.data[0] if response.data else None
+
+def get_user_submission(contest_id: int, user_tg_id: int):
+    response = supabase.table("contest_submissions").select("*").eq("contest_id", contest_id).eq("user_tg_id", user_tg_id).execute()
+    return response.data[0] if response.data else None
+
+def get_pending_submissions(contest_id: int):
+    response = supabase.table("contest_submissions").select("*").eq("contest_id", contest_id).eq("status", "pending").order("submitted_at").execute()
+    return response.data if response.data else []
+
+def update_submission_status(submission_id: int, status: str):
+    supabase.table("contest_submissions").update({"status": status}).eq("id", submission_id).execute()
+
 # --- ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ---
 def generate_pet_image(user_tg_id: int):
     """Генерирует картинку питомца с надетой одеждой в правильном порядке."""
@@ -205,6 +257,7 @@ def generate_pet_image(user_tg_id: int):
     user.get('equipped_bottom_id'),
     user.get('equipped_shoes_id'), 
     user.get('equipped_top_id'),
+    user.get('equipped_costume_id'),
     user.get('equipped_glasses_id'),
     user.get('equipped_face_id'),
     user.get('equipped_head_id')
@@ -487,10 +540,9 @@ async def build_tasks_view(tg_id: int):
 async def show_admin_panel(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return await message.answer("У тебя нет прав администратора.")
-    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 Рассылки", callback_data="admin_broadcast_menu"),
-         InlineKeyboardButton(text="👥 Команды", callback_data="admin_teams_menu")],
+         InlineKeyboardButton(text="🏆 Конкурсы", callback_data="admin_contests_menu")],
         [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="admin_exit")]
     ])
     await message.answer("🛠 **Админ-панель**\n\nВыбери раздел:", reply_markup=kb, parse_mode="Markdown")
@@ -1215,6 +1267,404 @@ async def create_sticker_pack_handler(callback: CallbackQuery):
         logger.error(f"Sticker error: {e}")
         await callback.message.answer("⚠️ Ошибка создания пака. Попробуй позже.")
 
+# --- ОБРАБОТЧИКИ: КОНКУРСЫ (АДМИН) ---
+
+@dp.callback_query(F.data == "admin_contests_menu")
+async def admin_contests_menu(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Нет доступа", show_alert=True)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать конкурс", callback_data="contest_create_start")],
+        [InlineKeyboardButton(text="📋 Активные конкурсы", callback_data="contest_list_active")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")]
+    ])
+    await callback.message.edit_text("🏆 **Конкурсы**\n\nВыбери действие:", reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "contest_create_start")
+async def contest_create_start(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Нет доступа", show_alert=True)
+    
+    await state.set_state(ContestCreate.waiting_for_text)
+    await callback.message.edit_text(
+        "📝 **Создание конкурса**\n\n"
+        "Пришли текст задания для участников.\n\n"
+        "Например:\n"
+        "«Сфоткай свой рабочий день в лагере и пришли нам!»\n\n"
+        "Отмена — /cancel"
+    )
+    await callback.answer()
+
+@dp.message(ContestCreate.waiting_for_text)
+async def contest_create_text(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    if not message.text or len(message.text) < 5:
+        return await message.answer("Текст должен быть не короче 5 символов. Попробуй ещё раз:")
+    
+    await state.update_data(contest_text=message.text)
+    await state.set_state(ContestCreate.waiting_for_reward)
+    await message.answer("💰 Теперь укажи размер награды в вайбах (число):")
+
+@dp.message(ContestCreate.waiting_for_reward)
+async def contest_create_reward(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    if not message.text.isdigit() or int(message.text) <= 0:
+        return await message.answer("Введи положительное число.")
+    
+    reward = int(message.text)
+    data = await state.get_data()
+    await state.update_data(contest_reward=reward)
+    await state.set_state(ContestCreate.confirming)
+    
+    await message.answer(
+        f"📋 **Проверь данные конкурса:**\n\n"
+        f"📝 Текст:\n{data['contest_text']}\n\n"
+        f"💰 Награда: {reward} {vibes_word(reward)}\n\n"
+        f"После подтверждения задание будет разослано всем пользователям.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Запустить", callback_data="contest_confirm_launch"),
+             InlineKeyboardButton(text="❌ Отмена", callback_data="contest_cancel")]
+        ]),
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(ContestCreate.confirming, F.data == "contest_confirm_launch")
+async def contest_confirm_launch(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Нет доступа", show_alert=True)
+    
+    data = await state.get_data()
+    await state.clear()
+    
+    # Создаём конкурс в БД
+    contest = create_contest(callback.from_user.id, data['contest_text'], data['contest_reward'])
+    if not contest:
+        return await callback.message.edit_text("❌ Ошибка создания конкурса.")
+    
+    await callback.message.edit_text(f"🚀 Запускаю рассылку конкурса #{contest['id']}...")
+    
+    # Рассылаем всем пользователям
+    users = get_all_users()
+    success = 0
+    errors = 0
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Участвовать", callback_data=f"contest_join_{contest['id']}"),
+         InlineKeyboardButton(text="❌ Не участвовать", callback_data="contest_decline")]
+    ])
+    
+    for user in users:
+        try:
+            await bot.send_message(
+                user['tg_id'],
+                f"🏆 **Конкурс!**\n\n{data['contest_text']}\n\n💰 Приз: **{data['contest_reward']} {vibes_word(data['contest_reward'])}**",
+                reply_markup=kb,
+                parse_mode="Markdown"
+            )
+            success += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            errors += 1
+            logger.error(f"Ошибка рассылки конкурса пользователю {user['tg_id']}: {e}")
+    
+    await callback.message.answer(
+        f"✅ Конкурс запущен!\n\n"
+        f"📊 Рассылка:\n"
+        f"• Доставлено: {success}\n"
+        f"• Ошибок: {errors}\n"
+        f"• Всего пользователей: {len(users)}"
+    )
+
+@dp.callback_query(ContestCreate.confirming, F.data == "contest_cancel")
+async def contest_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("Создание конкурса отменено.")
+    await callback.answer()
+
+@dp.callback_query(F.data == "contest_decline")
+async def contest_decline(callback: CallbackQuery):
+    await callback.message.edit_text("Жаль! Может быть, в следующий раз 🤷")
+    await callback.answer()
+
+# --- ПРОСМОТР АКТИВНЫХ КОНКУРСОВ ---
+
+@dp.callback_query(F.data == "contest_list_active")
+async def contest_list_active(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Нет доступа", show_alert=True)
+    
+    contests = get_active_contests()
+    if not contests:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_contests_menu")]
+        ])
+        return await callback.message.edit_text("Нет активных конкурсов.", reply_markup=kb)
+    
+    kb = []
+    for c in contests:
+        # Считаем количество ответов
+        pending = len(get_pending_submissions(c['id']))
+        kb.append([InlineKeyboardButton(
+            text=f"#{c['id']} | 📝 {c['text'][:25]}... | ⏳ {pending}",
+            callback_data=f"contest_review_{c['id']}"
+        )])
+    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_contests_menu")])
+    
+    await callback.message.edit_text(
+        "📋 **Активные конкурсы**\n\nВыбери конкурс для проверки ответов:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("contest_review_"))
+async def contest_review_start(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Нет доступа", show_alert=True)
+    
+    contest_id = int(callback.data.replace("contest_review_", ""))
+    contest = get_contest(contest_id)
+    if not contest:
+        return await callback.answer("Конкурс не найден.", show_alert=True)
+    
+    # Сохраняем контекст проверки
+    await state.update_data(review_contest_id=contest_id, review_index=0)
+    await state.set_state(ContestReview.reviewing)
+    
+    await show_next_submission(callback.message, contest_id, 0)
+    await callback.answer()
+
+async def show_next_submission(target, contest_id: int, index: int):
+    """Показывает следующий ответ на проверку."""
+    submissions = get_pending_submissions(contest_id)
+    contest = get_contest(contest_id)
+    
+    if index >= len(submissions):
+        # Все ответы проверены
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏁 Завершить конкурс", callback_data=f"contest_finish_{contest_id}")],
+            [InlineKeyboardButton(text="⬅️ К списку конкурсов", callback_data="contest_list_active")]
+        ])
+        if isinstance(target, Message):
+            await target.answer(
+                f"✅ Все ответы по конкурсу #{contest_id} проверены!\n\n"
+                f"Можешь завершить конкурс или вернуться к списку.",
+                reply_markup=kb
+            )
+        else:
+            await target.edit_text(
+                f"✅ Все ответы по конкурсу #{contest_id} проверены!",
+                reply_markup=kb
+            )
+        return
+    
+    sub = submissions[index]
+    user = get_user(sub['user_tg_id'])
+    user_name = f"{user['first_name']} {user.get('last_name', '')}" if user else f"ID {sub['user_tg_id']}"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Одобрить", callback_data=f"contest_approve_{sub['id']}"),
+         InlineKeyboardButton(text="❌ Отклонить", callback_data=f"contest_reject_{sub['id']}")],
+        [InlineKeyboardButton(text="⏭ Пропустить", callback_data=f"contest_skip_{index + 1}")],
+        [InlineKeyboardButton(text=f"📊 {index + 1}/{len(submissions)}", callback_data="noop"),
+         InlineKeyboardButton(text="⬅️ Выход", callback_data="contest_list_active")]
+    ])
+    
+    caption = (
+        f"🏆 **Конкурс #{contest_id}**\n"
+        f"👤 Участник: {user_name}\n"
+        f"📅 Отправлено: {sub['submitted_at'][:16]}\n\n"
+        f"💰 Награда: {contest['reward']} {vibes_word(contest['reward'])}"
+    )
+    
+    # Отправляем фото с подписью
+    if isinstance(target, Message):
+        # Если target - это Message (при первом входе), нужно либо edit, либо send
+        if target.photo:
+            await target.edit_caption(caption=caption, reply_markup=kb, parse_mode="Markdown")
+        else:
+            await target.delete()
+            await target.answer_photo(
+                photo=sub['photo_file_id'],
+                caption=caption,
+                reply_markup=kb,
+                parse_mode="Markdown"
+            )
+    else:
+        await target.edit_text("⏳ Загружаю фото...")
+        await target.delete()
+        await target.answer_photo(
+            photo=sub['photo_file_id'],
+            caption=caption,
+            reply_markup=kb,
+            parse_mode="Markdown"
+        )
+
+@dp.callback_query(ContestReview.reviewing, F.data.startswith("contest_approve_"))
+async def contest_approve(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Нет доступа", show_alert=True)
+    
+    sub_id = int(callback.data.replace("contest_approve_", ""))
+    data = await state.get_data()
+    contest_id = data['review_contest_id']
+    
+    # Получаем submission
+    sub = supabase.table("contest_submissions").select("*").eq("id", sub_id).execute().data[0]
+    contest = get_contest(contest_id)
+    
+    # Обновляем статус
+    update_submission_status(sub_id, "approved")
+    
+    # Начисляем награду
+    new_balance, team_name = add_vibes(sub['user_tg_id'], contest['reward'])
+    
+    # Уведомляем пользователя
+    try:
+        await bot.send_message(
+            sub['user_tg_id'],
+            f"🎉 **Поздравляем!**\n\n"
+            f"Твой ответ на конкурс принят!\n"
+            f"Тебе начислено **{contest['reward']} {vibes_word(contest['reward'])}**.\n\n"
+            f"💰 Твой новый баланс: {new_balance} {vibes_word(new_balance)}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Не удалось уведомить пользователя {sub['user_tg_id']}: {e}")
+    
+    # Показываем следующий ответ
+    await show_next_submission(callback.message, contest_id, data['review_index'])
+    await callback.answer(f"✅ Одобрено! +{contest['reward']} вайбов")
+
+@dp.callback_query(ContestReview.reviewing, F.data.startswith("contest_reject_"))
+async def contest_reject(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Нет доступа", show_alert=True)
+    
+    sub_id = int(callback.data.replace("contest_reject_", ""))
+    data = await state.get_data()
+    contest_id = data['review_contest_id']
+    
+    # Получаем submission для уведомления
+    sub = supabase.table("contest_submissions").select("*").eq("id", sub_id).execute().data[0]
+    
+    update_submission_status(sub_id, "rejected")
+    
+    # Уведомляем пользователя
+    try:
+        await bot.send_message(
+            sub['user_tg_id'],
+            "К сожалению, твой ответ на конкурс не принят. Но ты можешь участвовать в следующих!"
+        )
+    except Exception as e:
+        logger.error(f"Не удалось уведомить пользователя {sub['user_tg_id']}: {e}")
+    
+    await show_next_submission(callback.message, contest_id, data['review_index'])
+    await callback.answer("❌ Отклонено")
+
+@dp.callback_query(ContestReview.reviewing, F.data.startswith("contest_skip_"))
+async def contest_skip(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Нет доступа", show_alert=True)
+    
+    new_index = int(callback.data.replace("contest_skip_", ""))
+    data = await state.get_data()
+    await state.update_data(review_index=new_index)
+    
+    await show_next_submission(callback.message, data['review_contest_id'], new_index)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("contest_finish_"))
+async def contest_finish(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Нет доступа", show_alert=True)
+    
+    contest_id = int(callback.data.replace("contest_finish_", ""))
+    finish_contest(contest_id)
+    await state.clear()
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ К конкурсам", callback_data="admin_contests_menu")]
+    ])
+    await callback.message.edit_text(f"🏁 Конкурс #{contest_id} завершён!", reply_markup=kb)
+    await callback.answer()
+
+# --- ОБРАБОТЧИКИ: КОНКУРСЫ (ПОЛЬЗОВАТЕЛЬ) ---
+
+@dp.callback_query(F.data.startswith("contest_join_"))
+async def contest_join(callback: CallbackQuery, state: FSMContext):
+    contest_id = int(callback.data.replace("contest_join_", ""))
+    contest = get_contest(contest_id)
+    
+    if not contest or contest['status'] != 'active':
+        return await callback.answer("Этот конкурс уже завершён.", show_alert=True)
+    
+    # Проверяем, не отправлял ли уже
+    existing = get_user_submission(contest_id, callback.from_user.id)
+    if existing:
+        status_text = {
+            'pending': '⏳ Твой ответ уже на рассмотрении!',
+            'approved': '✅ Твой ответ уже принят!',
+            'rejected': '❌ Твой ответ был отклонён.'
+        }.get(existing['status'], '')
+        return await callback.answer(status_text, show_alert=True)
+    
+    await state.update_data(contest_id=contest_id)
+    await state.set_state(ContestSubmit.waiting_for_photo)
+    
+    await callback.message.edit_text(
+        f"📸 Отправь фото-ответ на конкурс!\n\n"
+        f"💰 Награда: {contest['reward']} {vibes_word(contest['reward'])}\n\n"
+        f"Отмена — /cancel"
+    )
+    await callback.answer()
+
+@dp.message(ContestSubmit.waiting_for_photo)
+async def contest_submit_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    contest_id = data.get('contest_id')
+    
+    if not contest_id:
+        await state.clear()
+        return await message.answer("Конкурс не найден. Попробуй ещё раз из сообщения о конкурсе.")
+    
+    contest = get_contest(contest_id)
+    if not contest or contest['status'] != 'active':
+        await state.clear()
+        return await message.answer("Этот конкурс уже завершён.", reply_markup=get_main_keyboard(message.from_user.id))
+    
+    # Проверяем, что это фото
+    if not message.photo:
+        return await message.answer("Пожалуйста, отправь именно **фото** 📸", parse_mode="Markdown")
+    
+    # Берём фото максимального размера
+    photo = message.photo[-1]
+    
+    # Сохраняем в БД
+    try:
+        save_submission(contest_id, message.from_user.id, photo.file_id)
+    except Exception as e:
+        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+            await state.clear()
+            return await message.answer(
+                "Ты уже отправлял ответ на этот конкурс!",
+                reply_markup=get_main_keyboard(message.from_user.id)
+            )
+        raise
+    
+    await state.clear()
+    await message.answer(
+        f"✅ Твой ответ принят!\n\n"
+        f"Ждём решения администратора. Если ответ будет одобрен — "
+        f"ты получишь **{contest['reward']} {vibes_word(contest['reward'])}** на баланс!",
+        reply_markup=get_main_keyboard(message.from_user.id),
+        parse_mode="Markdown"
+    )
+
 # --- FALLBACK ---
 @dp.message()
 async def catch_all_messages(message: Message, state: FSMContext):
@@ -1223,6 +1673,15 @@ async def catch_all_messages(message: Message, state: FSMContext):
 @dp.callback_query()
 async def catch_all_callbacks(callback: CallbackQuery):
     await callback.answer("Эта кнопка не активна")
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state:
+        await state.clear()
+        await message.answer("Действие отменено.", reply_markup=get_main_keyboard(message.from_user.id))
+    else:
+        await message.answer("Нет активных действий для отмены.", reply_markup=get_main_keyboard(message.from_user.id))
 
 # --- ЗАПУСК ---
 async def get_bot_username():
