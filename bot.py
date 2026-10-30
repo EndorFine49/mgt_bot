@@ -202,9 +202,12 @@ def generate_pet_image(user_tg_id: int):
     
     # Получаем ID надетых предметов
     equipped_ids = [
-        user.get('equipped_bottom_id'),
-        user.get('equipped_top_id'),
-        user.get('equipped_head_id')
+    user.get('equipped_bottom_id'),
+    user.get('equipped_shoes_id'), 
+    user.get('equipped_top_id'),
+    user.get('equipped_glasses_id'),
+    user.get('equipped_face_id'),
+    user.get('equipped_head_id')
     ]
     equipped_ids = [eid for eid in equipped_ids if eid]
     
@@ -1045,10 +1048,13 @@ async def show_shop_menu(tg_id: int, target):
         await edit_or_send_text(target, "Сначала выбери цвет своего стикмана!", reply_markup=get_main_keyboard(tg_id))
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎩 Голова", callback_data="shop_cat_head"), 
-         InlineKeyboardButton(text="👕 Верх", callback_data="shop_cat_top"), 
-         InlineKeyboardButton(text="👖 Низ", callback_data="shop_cat_bottom")]
-    ])
+    [InlineKeyboardButton(text="👓 Очки", callback_data="shop_cat_glasses"), 
+     InlineKeyboardButton(text="😃 Лицо", callback_data="shop_cat_face")],
+    [InlineKeyboardButton(text="🎩 Голова", callback_data="shop_cat_head"), 
+     InlineKeyboardButton(text="👕 Верх", callback_data="shop_cat_top")],
+    [InlineKeyboardButton(text="👖 Низ", callback_data="shop_cat_bottom"), 
+     InlineKeyboardButton(text="👟 Обувь", callback_data="shop_cat_shoes")]
+])
     await edit_or_send_text(target, "🛒 **Магазин одежды**\n\nВыбери категорию:", reply_markup=kb, parse_mode="Markdown")
 
 @dp.message(F.text == "🛒 Магазин")
