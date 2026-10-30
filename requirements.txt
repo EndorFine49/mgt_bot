@@ -2,3 +2,5 @@ aiogram>=3.3.0
 supabase
 python-dotenv
 Pillow
+APScheduler
+pytz
