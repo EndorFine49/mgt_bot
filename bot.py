@@ -158,6 +158,20 @@ def get_teams_rating():
     response = supabase.table("teams").select("name, balance").order("balance", desc=True).execute()
     return response.data if response.data else []
 
+def get_users_rating(limit: int = 5):
+    """Возвращает топ-N пользователей по балансу."""
+    response = supabase.table("users").select("tg_id, first_name, last_name, balance").order("balance", desc=True).limit(limit).execute()
+    return response.data if response.data else []
+
+def get_user_position(tg_id: int):
+    """Возвращает позицию пользователя в общем рейтинге."""
+    # Считаем, сколько пользователей имеют баланс больше текущего
+    user = get_user(tg_id)
+    if not user:
+        return None
+    response = supabase.table("users").select("tg_id").gt("balance", user["balance"]).execute()
+    return len(response.data) + 1 if response.data else 1
+
 def get_user_inventory(user_tg_id: int):
     response = supabase.table("user_inventory").select("item_id").eq("user_tg_id", user_tg_id).execute()
     return [item['item_id'] for item in response.data] if response.data else []
@@ -387,12 +401,41 @@ async def handle_profile(message: Message):
     user = get_user(tg_id)
     if not user:
         return await message.answer("Сначала зарегистрируйся через /start", reply_markup=get_main_keyboard(tg_id))
-    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Баланс", callback_data="profile_balance"),
-         InlineKeyboardButton(text="🐾 Мой питомец", callback_data="profile_pet")]
+         InlineKeyboardButton(text="🐾 Мой питомец", callback_data="profile_pet")],
+        [InlineKeyboardButton(text="🏆 Рейтинг пользователей", callback_data="profile_rating")]
     ])
     await message.answer("👤 **Мой профиль**\n\nВыбери раздел:", reply_markup=kb, parse_mode="Markdown")
+
+@dp.callback_query(F.data == "profile_rating")
+async def profile_rating(callback: CallbackQuery):
+    tg_id = callback.from_user.id
+    top_users = get_users_rating(5)
+    user_position = get_user_position(tg_id)
+    user = get_user(tg_id)
+    
+    text = "🏆 **Топ-5 пользователей по вайбам**\n\n"
+    
+    medals = ["🥇", "🥈", "🥉", "4.", "5."]
+    in_top = False
+    
+    for i, u in enumerate(top_users):
+        name = f"{u['first_name']} {u.get('last_name', '')}".strip()
+        marker = " ← это ты!" if u['tg_id'] == tg_id else ""
+        if u['tg_id'] == tg_id:
+            in_top = True
+        text += f"{medals[i]} {name} — {u['balance']} {vibes_word(u['balance'])}{marker}\n"
+    
+    # Если пользователь не в топ-5, показываем его место
+    if not in_top and user:
+        text += f"\n📍 **Твоё место:** {user_position} с {user['balance']} {vibes_word(user['balance'])}"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад в профиль", callback_data="profile_back")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
 
 @dp.callback_query(F.data == "profile_balance")
 async def profile_balance(callback: CallbackQuery):
@@ -442,7 +485,8 @@ async def profile_pet(callback: CallbackQuery):
 async def profile_back(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Баланс", callback_data="profile_balance"),
-         InlineKeyboardButton(text="🐾 Мой питомец", callback_data="profile_pet")]
+         InlineKeyboardButton(text="🐾 Мой питомец", callback_data="profile_pet")],
+        [InlineKeyboardButton(text="🏆 Рейтинг пользователей", callback_data="profile_rating")]
     ])
     await callback.message.edit_text(
         "👤 **Мой профиль**\n\nВыбери раздел:",
@@ -1102,6 +1146,7 @@ async def show_shop_menu(tg_id: int, target):
     kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="👓 Очки", callback_data="shop_cat_glasses"), 
      InlineKeyboardButton(text="😃 Лицо", callback_data="shop_cat_face")],
+    [InlineKeyboardButton(text="👗 Костюм", callback_data="shop_cat_glasses")],
     [InlineKeyboardButton(text="🎩 Голова", callback_data="shop_cat_head"), 
      InlineKeyboardButton(text="👕 Верх", callback_data="shop_cat_top")],
     [InlineKeyboardButton(text="👖 Низ", callback_data="shop_cat_bottom"), 
