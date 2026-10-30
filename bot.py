@@ -15,6 +15,9 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+import pytz
 
 # --- НАСТРОЙКИ И ЛОГИРОВАНИЕ ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -30,6 +33,8 @@ BOT_USERNAME = os.getenv("BOT_USERNAME")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Планировщик для ежедневных напоминаний
+scheduler = AsyncIOScheduler(timezone=pytz.timezone('Europe/Moscow'))
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def vibes_word(count):
@@ -160,26 +165,22 @@ def buy_item(user_tg_id: int, item_id: int, price: int):
     }).execute()
     return True, "Покупка успешна!"
 
-def get_week_boundaries(date=None):
-    if date is None:
-        date = datetime.now().date()
-    week_start = date - timedelta(days=date.weekday())
-    week_end = week_start + timedelta(days=6)
-    return week_start, week_end
+def get_today_moscow():
+    moscow_tz = pytz.timezone('Europe/Moscow')
+    return datetime.now(moscow_tz).date()
 
-def get_user_goal(tg_id: int, week_start):
-    """Возвращает цель пользователя на указанную неделю."""
-    response = supabase.table("goals").select("*").eq("user_tg_id", tg_id).eq("week_start", week_start.isoformat()).execute()
+def get_user_goal_for_date(tg_id: int, date):
+    response = supabase.table("goals").select("*").eq("user_tg_id", tg_id).eq("goal_date", date.isoformat()).execute()
     return response.data[0] if response.data else None
 
-def set_goal(tg_id: int, text: str, week_start, week_end):
-    """Создаёт цель на неделю."""
+def set_daily_goal(tg_id: int, text: str, date):
     response = supabase.table("goals").insert({
         "user_tg_id": tg_id,
-        "week_start": week_start.isoformat(),
+        "goal_date": date.isoformat(),
         "text": text,
         "completed": None,
-        "reward_claimed": False
+        "reward_claimed": False,
+        "reminder_sent": True  
     }).execute()
     return response.data[0] if response.data else None
 
@@ -420,7 +421,7 @@ async def claim_vibe_inline(callback: CallbackQuery):
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✨ Получить ещё", callback_data="claim_vibe_inline")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile_back")]
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="tasks_back")]
         ])
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
     await callback.answer()
@@ -436,59 +437,42 @@ async def handle_tasks(message: Message):
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
 
 async def build_tasks_view(tg_id: int):
-    """Строит текст и клавиатуру для раздела 'Задания'."""
-    today = datetime.now().date()
-    # is_sunday = today.weekday() == 6  
-    is_sunday = True #ВРЕМЕННО, раскомментить верхнюю строку
+    today = get_today_moscow()
+    now_moscow = datetime.now(pytz.timezone('Europe/Moscow'))
+    current_hour = now_moscow.hour
     
-    current_week_start, current_week_end = get_week_boundaries(today)
-    current_goal = get_user_goal(tg_id, current_week_start)
+    today_goal = get_user_goal_for_date(tg_id, today)
     
     kb = []
     text = "📋 **Задания**\n\n"
+    can_report = current_hour >= 20
     
-    if is_sunday:
-        if current_goal:
-            week_text = f"{current_week_start.strftime('%d.%m')} — {current_week_end.strftime('%d.%m')}"
-            
-            if current_goal.get('completed') is None:
-                text += f"🎯 **Воскресенье — время подвести итоги!**\n\n"
-                text += f"Твоя цель на неделю ({week_text}) была:\n"
-                text += f"«{current_goal['text']}»\n\n"
-                text += f"Удалось ли её выполнить?"
-                kb.append([
-                    InlineKeyboardButton(text="✅ Выполнено (+1 вайб)", callback_data=f"goal_complete_{current_goal['id']}_true"),
-                    InlineKeyboardButton(text="❌ Не выполнено", callback_data=f"goal_complete_{current_goal['id']}_false")
-                ])
-            elif current_goal.get('completed') is True:
-                text += f"🎉 **Цель на неделю ({week_text}) выполнена!**\n\n"
-                text += f"«{current_goal['text']}»\n\n"
-                text += f"Статус: ✅ Выполнено (+1 вайб начислен)"
-            else:  # False
-                text += f"💪 **Цель на неделю ({week_text}) не выполнена.**\n\n"
-                text += f"«{current_goal['text']}»\n\n"
-                text += f"Статус: ❌ Не выполнена\n"
-                text += f"В понедельник начнётся новая неделя — поставь новую цель!"
+    if today_goal:
+        date_text = today.strftime('%d.%m.%Y')
+        text += f"🎯 **Моя цель на сегодня ({date_text}):**\n"
+        text += f"«{today_goal['text']}»\n\n"
+        
+        if today_goal.get('completed') is True:
+            text += "Статус: ✅ Выполнено (+1 вайб начислен)"
+        elif today_goal.get('completed') is False:
+            text += "Статус: ❌ Не выполнена"
+        elif can_report:
+            text += "Статус: ⏳ Ожидает отчёта\n\n"
+            text += "Время отчитаться о выполнении!"
+            kb.append([
+                InlineKeyboardButton(text="✅ Выполнено (+1 вайб)", callback_data=f"goal_complete_{today_goal['id']}_true"),
+                InlineKeyboardButton(text="❌ Не выполнено", callback_data=f"goal_complete_{today_goal['id']}_false")
+            ])
         else:
-            # Воскресенье, но цели на эту неделю не было
-            week_text = f"{current_week_start.strftime('%d.%m')} — {current_week_end.strftime('%d.%m')}"
-            text += f"⚠️ **Воскресенье, а цели на эту неделю не было!**\n\n"
-            text += f"На этой неделе ({week_text}) ты не поставил цель, поэтому подводить итоги нечего.\n\n"
-            text += f"В понедельник не забудь поставить новую цель!"
+            text += "Статус: ⏳ В процессе\n\n"
+            text += f"Отчитаться о выполнении можно будет после 20:00.\n"
+            text += f"Сейчас: {current_hour}:00"
     else:
-        # Будний день (пн-сб)
-        if current_goal:
-            week_text = f"{current_week_start.strftime('%d.%m')} — {current_week_end.strftime('%d.%m')}"
-            text += f"🎯 **Моя цель на неделю ({week_text}):**\n"
-            text += f"«{current_goal['text']}»\n\n"
-            text += f"Статус: ⏳ В процессе\n\n"
-            text += f"Подвести итог можно будет в воскресенье."
-        else:
-            week_text = f"{current_week_start.strftime('%d.%m')} — {current_week_end.strftime('%d.%m')}"
-            text += f"🎯 **Цель на неделю ({week_text}):**\n\n"
-            text += f"Ты ещё не поставил цель на эту неделю!\n\n"
-            text += f"Поставь цель сейчас и подведи итог в воскресенье."
-            kb.append([InlineKeyboardButton(text="🎯 Поставить цель", callback_data="goal_set")])
+        date_text = today.strftime('%d.%m.%Y')
+        text += f"🎯 **Цель на сегодня ({date_text}):**\n\n"
+        text += "Ты ещё не поставил цель на сегодня!\n\n"
+        text += "Поставь цель сейчас и отчитайся о её выполнении после 20:00."
+        kb.append([InlineKeyboardButton(text="🎯 Поставить цель", callback_data="goal_set")])
     
     text += "\n\n"
     kb.append([InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")])
@@ -810,98 +794,86 @@ async def tasks_back(callback: CallbackQuery):
 # --- ОБРАБОТЧИКИ: ЛИЧНЫЕ ЦЕЛИ ---
 @dp.callback_query(F.data == "goal_set")
 async def goal_set_prompt(callback: CallbackQuery, state: FSMContext):
-    # В воскресенье ставить цель нельзя
-    today = datetime.now().date()
-    if today.weekday() == 6:
-        return await callback.answer("В воскресенье ставить цель нельзя — это день подведения итогов!", show_alert=True)
+    today = get_today_moscow()
+    existing = get_user_goal_for_date(callback.from_user.id, today)
+    if existing:
+        return await callback.answer("Цель на сегодня уже поставлена!", show_alert=True)
     
     await state.set_state(Goal.waiting_for_text)
     await callback.message.edit_text(
-        "✍️ Напиши свою цель на эту неделю одним сообщением.\n\n"
+        "✍️ Напиши свою цель на сегодня одним сообщением.\n\n"
         "Например:\n"
-        "• «Прочитать 50 страниц книги»\n"
-        "• «Сделать 3 тренировки»\n"
-        "• «Выучить 20 новых слов»\n\n"
+        "• «Сделать 100 звонков»\n"
+        "• «Прочитать 20 страниц книги»\n"
+        "• «Сделать 30 приседаний»\n\n"
+        "Отчёт о выполнении нужно будет дать после 20:00.\n\n"
         "Отмена — /cancel"
     )
     await callback.answer()
-    
+
 @dp.message(Goal.waiting_for_text)
 async def goal_save(message: Message, state: FSMContext):
-    # В воскресенье ставить новую цель нельзя
-    # today = datetime.now().date()
-    # if today.weekday() == 6:
-    #     await state.clear()
-    #     return await message.answer(
-    #         "⚠️ В воскресенье ставить новую цель нельзя — это день подведения итогов!\n"
-    #         "Приходи в понедельник.",
-    #         reply_markup=get_main_keyboard(message.from_user.id)
-    #     )
-    # 
-    
     tg_id = message.from_user.id
     text = message.text.strip()
     
     if len(text) < 3 or len(text) > 200:
         return await message.answer("Цель должна быть от 3 до 200 символов. Попробуй ещё раз:")
     
-    week_start, week_end = get_week_boundaries(today)
+    today = get_today_moscow()
     
-    # Проверяем, есть ли уже цель на эту неделю
-    existing = get_user_goal(tg_id, week_start)
+    # Проверяем, есть ли уже цель на сегодня
+    existing = get_user_goal_for_date(tg_id, today)
     if existing:
-        # ❌ Цель уже есть — не даём изменить
         await state.clear()
         return await message.answer(
-            "⚠️ Ты уже поставил цель на эту неделю и изменить её нельзя.\n\n"
+            f"⚠️ Цель на сегодня уже поставлена.\n\n"
             f"Твоя цель: «{existing['text']}»\n\n"
             "Работай над её выполнением! 💪",
             reply_markup=get_main_keyboard(tg_id)
         )
     
-    # Создаём новую цель
-    set_goal(tg_id, text, week_start, week_end)
+    # Создаём цель
+    set_daily_goal(tg_id, text, today)
     
     await state.clear()
     await message.answer(
         f"✅ Цель сохранена!\n\n"
         f"«{text}»\n\n"
         f"Удачи в её выполнении! 💪\n"
-        f"Подвести итог нужно будет в воскресенье.",
+        f"Отчитаться о выполнении нужно будет после 20:00.",
         reply_markup=get_main_keyboard(tg_id)
     )
 
 @dp.callback_query(F.data.startswith("goal_complete_"))
 async def goal_complete(callback: CallbackQuery):
-    # Защита: подвести итог можно только в воскресенье
-    today = datetime.now().date()
-    # if today.weekday() != 6:
-    #     return await callback.answer("Подвести итог можно только в воскресенье!", show_alert=True)
-    #ВРЕМЕННО, раскомментить две строки сверху
+    today = get_today_moscow()
+    now_moscow = datetime.now(pytz.timezone('Europe/Moscow'))
+    current_hour = now_moscow.hour
     
-    # Разбираем callback_data: goal_complete_{id}_{true/false}
+    # Защита: отчитаться можно только после 20:00
+    if current_hour < 20:
+        return await callback.answer("Отчитаться о выполнении можно только после 20:00!", show_alert=True)
+    
+    # Разбираем callback_data
     parts = callback.data.split("_")
     goal_id = int(parts[2])
     completed = parts[3] == "true"
     
     tg_id = callback.from_user.id
     
-    # Проверяем, что цель относится к текущей неделе
-    current_week_start, _ = get_week_boundaries(today)
+    # Проверяем, что цель относится к сегодняшнему дню
     goal = supabase.table("goals").select("*").eq("id", goal_id).execute().data[0]
     
-    if goal['week_start'] != current_week_start.isoformat():
+    if goal['goal_date'] != today.isoformat():
         return await callback.answer("Эта цель уже неактуальна.", show_alert=True)
     
-    # Проверяем, не подведена ли уже
     if goal.get('completed') is not None:
-        return await callback.answer("Эта цель уже подведена.", show_alert=True)
+        return await callback.answer("По этой цели уже отчитались.", show_alert=True)
     
     # Обновляем статус
     update_goal_status(goal_id, completed)
     
     if completed:
-        # Проверяем, не начисляли ли уже награду
         if not goal.get('reward_claimed'):
             new_balance, team_name = add_vibes(tg_id, 1)
             supabase.table("goals").update({"reward_claimed": True}).eq("id", goal_id).execute()
@@ -916,7 +888,7 @@ async def goal_complete(callback: CallbackQuery):
     else:
         text = (
             "💪 Не расстраивайся!\n\n"
-            "В понедельник начнётся новая неделя — поставь новую цель и попробуй снова."
+            "Завтра поставь новую цель и попробуй снова."
         )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1252,10 +1224,76 @@ async def get_bot_username():
     me = await bot.get_me()
     BOT_USERNAME = me.username
 
+async def send_daily_reminders():
+    """Отправляет напоминания о постановке цели в 10:00 МСК."""
+    logger.info("Запуск отправки ежедневных напоминаний...")
+    today = get_today_moscow()
+    
+    # Получаем всех пользователей
+    users = get_all_users()
+    
+    for user_data in users:
+        tg_id = user_data['tg_id']
+        
+        # Проверяем, есть ли уже цель на сегодня
+        existing = get_user_goal_for_date(tg_id, today)
+        if existing:
+            continue  # Цель уже есть, пропускаем
+        
+        # Отправляем напоминание
+        try:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🎯 Поставить цель", callback_data="goal_set")]
+            ])
+            await bot.send_message(
+                tg_id,
+                f"🌅 Доброе утро!\n\n"
+                f"Сегодня {today.strftime('%d.%m.%Y')}. Поставь цель на день и отчитайся о её выполнении после 20:00!\n\n"
+                f"За выполнение цели ты получишь +1 вайб 💪",
+                reply_markup=kb
+            )
+            logger.info(f"Напоминание отправлено пользователю {tg_id}")
+        except Exception as e:
+            logger.error(f"Ошибка отправки напоминания пользователю {tg_id}: {e}")
+
+async def mark_unreported_goals_as_failed():
+    """В 10:00 помечает неотчитанные цели как невыполненные."""
+    logger.info("Помечаем неотчитанные цели как невыполненные...")
+    yesterday = get_today_moscow() - timedelta(days=1)
+    
+    # Получаем все цели за вчерашний день, которые не отчитаны
+    response = supabase.table("goals").select("*").eq("goal_date", yesterday.isoformat()).is_("completed", "null").execute()
+    
+    if response.data:
+        for goal in response.data:
+            supabase.table("goals").update({"completed": False}).eq("id", goal['id']).execute()
+            logger.info(f"Цель {goal['id']} пользователя {goal['user_tg_id']} помечена как невыполненная")
+
 async def main():
     logger.info("🚀 Бот запускается...")
     await bot.delete_webhook(drop_pending_updates=True)
     await get_bot_username()
+    
+    # Настраиваем планировщик
+    # Напоминания в 10:00 МСК
+    scheduler.add_job(
+        send_daily_reminders,
+        CronTrigger(hour=10, minute=0),
+        id="daily_reminders",
+        replace_existing=True
+    )
+    
+    # Пометка неотчитанных целей в 10:00 МСК
+    scheduler.add_job(
+        mark_unreported_goals_as_failed,
+        CronTrigger(hour=10, minute=0),
+        id="mark_unreported_goals",
+        replace_existing=True
+    )
+    
+    scheduler.start()
+    logger.info("✅ Планировщик запущен")
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
