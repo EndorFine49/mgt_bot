@@ -1146,7 +1146,7 @@ async def show_shop_menu(tg_id: int, target):
     kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="👓 Очки", callback_data="shop_cat_glasses"), 
      InlineKeyboardButton(text="😃 Лицо", callback_data="shop_cat_face")],
-    [InlineKeyboardButton(text="👗 Костюм", callback_data="shop_cat_glasses")],
+    [InlineKeyboardButton(text="👗 Костюм", callback_data="shop_cat_costume")],
     [InlineKeyboardButton(text="🎩 Голова", callback_data="shop_cat_head"), 
      InlineKeyboardButton(text="👕 Верх", callback_data="shop_cat_top")],
     [InlineKeyboardButton(text="👖 Низ", callback_data="shop_cat_bottom"), 
