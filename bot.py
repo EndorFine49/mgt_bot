@@ -34,7 +34,9 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Планировщик для ежедневных напоминаний
-scheduler = AsyncIOScheduler(timezone=pytz.timezone('Europe/Moscow'))
+MOSCOW_TZ = pytz.timezone('Europe/Moscow')
+scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
+
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def vibes_word(count):
@@ -57,7 +59,8 @@ def get_main_keyboard(tg_id: int) -> ReplyKeyboardMarkup:
     
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
-TEAM_OPTIONS = ["Джем", "Драйв", "Сияй", "Начало", "Big Family", "Полис", "Крым Team", "Не состою в команде"]
+# TEAM_OPTIONS = ["Джем", "Драйв", "Сияй", "Начало", "Big Family", "Полис", "Крым Team", "Не состою в команде"]
+TEAM_OPTIONS = ["ОО", "ОРС", "ОПИК"]
 
 def get_team_keyboard():
     keyboard = []
@@ -193,6 +196,43 @@ def buy_item(user_tg_id: int, item_id: int, price: int):
 def get_today_moscow():
     moscow_tz = pytz.timezone('Europe/Moscow')
     return datetime.now(moscow_tz).date()
+
+async def send_evening_reminders():
+    """20:00 МСК — напоминаем отчитаться о цели."""
+    logger.info("🌆 Запуск вечерних напоминаний о целях...")
+    today = get_today_moscow()
+    
+    users = get_all_users()
+    sent_count = 0
+    
+    for user_data in users:
+        tg_id = user_data['tg_id']
+        
+        # Ищем цель на сегодня, которая ещё не отчитана
+        existing = get_user_goal(tg_id, today)
+        if not existing or existing.get('completed') is not None:
+            continue  # Цели нет или уже отчитались
+        
+        try:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📋 Отчитаться", callback_data="tasks_refresh")],
+                [InlineKeyboardButton(text="🎯 К целям", callback_data="goal_review")]
+            ])
+            await bot.send_message(
+                tg_id,
+                f"🌆 Добрый вечер!\n\n"
+                f"Сегодня ты поставил цель:\n"
+                f"«{existing['text']}»\n\n"
+                f"Настало время отчитаться о её выполнении! "
+                f"Если цель выполнена — ты получишь +1 вайб 💪",
+                reply_markup=kb
+            )
+            sent_count += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.error(f"Ошибка отправки вечернего напоминания {tg_id}: {e}")
+    
+    logger.info(f"✅ Вечерние напоминания отправлены: {sent_count}/{len(users)}")
 
 def get_user_goal_for_date(tg_id: int, date):
     response = supabase.table("goals").select("*").eq("user_tg_id", tg_id).eq("goal_date", date.isoformat()).execute()
@@ -453,7 +493,7 @@ async def profile_balance(callback: CallbackQuery):
                 text += f"{medal} {team['name']}: {team['balance']} {vibes_word(team['balance'])}\n"
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")],
+            # [InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile_back")]
         ])
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
@@ -509,22 +549,22 @@ async def profile_back(callback: CallbackQuery):
     )
     await callback.answer()
 
-@dp.callback_query(F.data == "claim_vibe_inline")
-async def claim_vibe_inline(callback: CallbackQuery):
-    tg_id = callback.from_user.id
-    user = get_user(tg_id)
-    if user:
-        new_balance, team_name = add_vibes(tg_id, 1)
-        text = f"Тебе +1 вайб! ✨\nТвой баланс: {new_balance} {vibes_word(new_balance)}"
-        if team_name:
-            text += f"\n\n🎯 Твоя команда **{team_name}** тоже получила +1 вайб!"
+# @dp.callback_query(F.data == "claim_vibe_inline")
+# async def claim_vibe_inline(callback: CallbackQuery):
+#     tg_id = callback.from_user.id
+#     user = get_user(tg_id)
+#     if user:
+#         new_balance, team_name = add_vibes(tg_id, 1)
+#         text = f"Тебе +1 вайб! ✨\nТвой баланс: {new_balance} {vibes_word(new_balance)}"
+#         if team_name:
+#             text += f"\n\n🎯 Твоя команда **{team_name}** тоже получила +1 вайб!"
         
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✨ Получить ещё", callback_data="claim_vibe_inline")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="tasks_back")]
-        ])
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
-    await callback.answer()
+#         kb = InlineKeyboardMarkup(inline_keyboard=[
+#             # [InlineKeyboardButton(text="✨ Получить ещё", callback_data="claim_vibe_inline")],
+#             [InlineKeyboardButton(text="⬅️ Назад", callback_data="tasks_back")]
+#         ])
+#         await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+#     await callback.answer()
 
 @dp.message(F.text == "📋 Задания")
 async def handle_tasks(message: Message):
@@ -575,7 +615,7 @@ async def build_tasks_view(tg_id: int):
         kb.append([InlineKeyboardButton(text="🎯 Поставить цель", callback_data="goal_set")])
     
     text += "\n\n"
-    kb.append([InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")])
+    # kb.append([InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")])
     kb.append([InlineKeyboardButton(text="🎰 Рулетка", callback_data="roulette_menu")])
     
     return text, kb
@@ -1733,7 +1773,6 @@ async def get_bot_username():
     BOT_USERNAME = me.username
 
 async def send_daily_reminders():
-    """Отправляет напоминания о постановке цели в 10:00 МСК."""
     logger.info("Запуск отправки ежедневных напоминаний...")
     today = get_today_moscow()
     
@@ -1786,15 +1825,22 @@ async def main():
     # Напоминания в 10:00 МСК
     scheduler.add_job(
         send_daily_reminders,
-        CronTrigger(hour=10, minute=0),
+        CronTrigger(hour=16, minute=15, timezone=MOSCOW_TZ),
         id="daily_reminders",
+        replace_existing=True
+    )
+
+    scheduler.add_job(
+        send_evening_reminders,
+        CronTrigger(hour=16, minute=17, timezone=MOSCOW_TZ),
+        id="evening_reminders",
         replace_existing=True
     )
     
     # Пометка неотчитанных целей в 10:00 МСК
     scheduler.add_job(
         mark_unreported_goals_as_failed,
-        CronTrigger(hour=10, minute=0),
+        CronTrigger(hour=16, minute=20, timezone=MOSCOW_TZ),
         id="mark_unreported_goals",
         replace_existing=True
     )
