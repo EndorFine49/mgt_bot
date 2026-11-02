@@ -1870,7 +1870,7 @@ async def main():
 
     scheduler.add_job(
         send_evening_reminders,
-        CronTrigger(hour=14, minute=40),
+        CronTrigger(hour=20, minute=00),
         id="evening_reminders",
         replace_existing=True
     )
