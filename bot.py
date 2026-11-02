@@ -209,7 +209,7 @@ async def send_evening_reminders():
         tg_id = user_data['tg_id']
         
         # Ищем цель на сегодня, которая ещё не отчитана
-        existing = get_user_goal(tg_id, today)
+        existing = get_user_goal_for_date(tg_id, today)
         if not existing or existing.get('completed') is not None:
             continue  # Цели нет или уже отчитались
         
@@ -296,13 +296,11 @@ def update_submission_status(submission_id: int, status: str):
 
 # --- ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ---
 def generate_pet_image(user_tg_id: int):
-    """Генерирует картинку питомца с надетой одеждой в правильном порядке."""
     user = get_user(user_tg_id)
     pet_id = user.get('equipped_pet_id')
     if not pet_id:
         return None
-    
-    # Открываем базовое изображение питомца
+
     pet_item = supabase.table("items").select("filename").eq("id", pet_id).execute().data[0]
     base_image = Image.open(f"assets/pets/{pet_item['filename']}").convert("RGBA")
     
@@ -444,6 +442,7 @@ async def handle_profile(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Баланс", callback_data="profile_balance"),
          InlineKeyboardButton(text="🐾 Мой питомец", callback_data="profile_pet")],
+         [InlineKeyboardButton(text="📝 Анкета", callback_data="check_survey")],
         [InlineKeyboardButton(text="🏆 Рейтинг пользователей", callback_data="profile_rating")]
     ])
     await message.answer("👤 **Мой профиль**\n\nВыбери раздел:", reply_markup=kb, parse_mode="Markdown")
@@ -1100,7 +1099,7 @@ async def process_hobbies(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(text, reply_markup=get_main_keyboard(tg_id), parse_mode="Markdown")
 
-@dp.message(F.text == "📋 Посмотреть анкету")
+@dp.callback_query(F.data == "check_survey")
 async def handle_survey_menu(message: Message):
     user = get_user(message.from_user.id)
     if not user: return await message.answer("Сначала /start", reply_markup=get_main_keyboard(message.from_user.id))
@@ -1245,10 +1244,16 @@ async def shop_color_preview(callback: CallbackQuery):
     
     kb = []
     if item['id'] in inventory:
-        equipped_slot = f"equipped_{item['category']}_id"
+    # Определяем нужный слот
+        if item['category'] == 'head':
+            slot = GROUP_TO_SLOT.get(item['group_name'], 'hat')
+            equipped_slot = f"equipped_{slot}_id"
+        else:
+            equipped_slot = f"equipped_{item['category']}_id"
+        
         if user.get(equipped_slot) == item['id']:
             kb.append([InlineKeyboardButton(text="✅ Сейчас надето", callback_data="noop")])
-            kb.append([InlineKeyboardButton(text="❌ Снять", callback_data=f"unequip_{item['category']}")])
+            kb.append([InlineKeyboardButton(text="❌ Снять", callback_data=f"unequip_{equipped_slot.replace('equipped_', '').replace('_id', '')}")])
         else:
             kb.append([InlineKeyboardButton(text="👕 Надеть", callback_data=f"equip_{item['id']}")])
     else:
@@ -1273,39 +1278,56 @@ async def buy_item_callback(callback: CallbackQuery):
         await callback.message.edit_caption(caption=f"**{item['name']}**\n✅ Куплено!", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
     else:
         await callback.answer(msg, show_alert=True)
+    
+GROUP_TO_SLOT = {
+    'Шляпы': 'head',
+    'Кепки': 'head',
+    'Усы': 'face',
+    'Очки': 'glasses',
+}
 
 @dp.callback_query(F.data.startswith("equip_"))
 async def equip_item_callback(callback: CallbackQuery):
     item_id = int(callback.data.replace("equip_", ""))
     item = supabase.table("items").select("*").eq("id", item_id).execute().data[0]
-    update_user(callback.from_user.id, {f"equipped_{item['category']}_id": item_id})
+    
+    if item['category'] == 'head':
+        slot = GROUP_TO_SLOT.get(item['group_name'], 'head')  
+        slot_column = f"equipped_{slot}_id"
+    else:
+        slot_column = f"equipped_{item['category']}_id"
+    
+    update_user(callback.from_user.id, {slot_column: item_id})
     await callback.answer("✅ Надето!", show_alert=True)
+    
     kb = [
         [InlineKeyboardButton(text="✅ Сейчас надето", callback_data="noop")],
-        [InlineKeyboardButton(text="❌ Снять", callback_data=f"unequip_{item['category']}")],
+        [InlineKeyboardButton(text="❌ Снять", callback_data=f"unequip_{slot_column.replace('equipped_', '').replace('_id', '')}")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data=f"shop_group_{item['category']}_{item['group_name']}")]
     ]
     await callback.message.edit_caption(reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @dp.callback_query(F.data.startswith("unequip_"))
 async def unequip_item_callback(callback: CallbackQuery):
-    category = callback.data.replace("unequip_", "")
+    slot_key = callback.data.replace("unequip_", "") 
     tg_id = callback.from_user.id
     user = get_user(tg_id)
-    current_item_id = user.get(f"equipped_{category}_id")
-    item = supabase.table("items").select("*").eq("id", current_item_id).execute().data[0]
     
-    update_user(tg_id, {f"equipped_{category}_id": None})
+    slot_column = f"equipped_{slot_key}_id"
+    current_item_id = user.get(slot_column)
+    
+    if not current_item_id:
+        return await callback.answer("Ничего не надето", show_alert=True)
+    
+    item = supabase.table("items").select("*").eq("id", current_item_id).execute().data[0]
+    update_user(tg_id, {slot_column: None})
     await callback.answer("Снято", show_alert=True)
+    
     kb = [
         [InlineKeyboardButton(text="👕 Надеть", callback_data=f"equip_{current_item_id}")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data=f"shop_group_{item['category']}_{item['group_name']}")]
     ]
     await callback.message.edit_caption(reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-
-@dp.callback_query(F.data == "noop")
-async def noop_callback(callback: CallbackQuery):
-    await callback.answer("Это currentItem", show_alert=True)
 
 @dp.callback_query(F.data == "show_pet")
 async def show_pet(callback: CallbackQuery):
@@ -1825,14 +1847,14 @@ async def main():
     # Напоминания в 10:00 МСК
     scheduler.add_job(
         send_daily_reminders,
-        CronTrigger(hour=16, minute=15, timezone=MOSCOW_TZ),
+        CronTrigger(hour=10, minute=00, timezone=MOSCOW_TZ),
         id="daily_reminders",
         replace_existing=True
     )
 
     scheduler.add_job(
         send_evening_reminders,
-        CronTrigger(hour=16, minute=17, timezone=MOSCOW_TZ),
+        CronTrigger(hour=16, minute=50),
         id="evening_reminders",
         replace_existing=True
     )
@@ -1840,7 +1862,7 @@ async def main():
     # Пометка неотчитанных целей в 10:00 МСК
     scheduler.add_job(
         mark_unreported_goals_as_failed,
-        CronTrigger(hour=16, minute=20, timezone=MOSCOW_TZ),
+        CronTrigger(hour=10, minute=00, timezone=MOSCOW_TZ),
         id="mark_unreported_goals",
         replace_existing=True
     )
