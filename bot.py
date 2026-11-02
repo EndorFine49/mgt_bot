@@ -605,7 +605,6 @@ async def build_tasks_view(tg_id: int):
         else:
             text += "Статус: ⏳ В процессе\n\n"
             text += f"Отчитаться о выполнении можно будет после 20:00.\n"
-            text += f"Сейчас: {current_hour}:00"
     else:
         date_text = today.strftime('%d.%m.%Y')
         text += f"🎯 **Цель на сегодня ({date_text}):**\n\n"
@@ -1871,7 +1870,7 @@ async def main():
 
     scheduler.add_job(
         send_evening_reminders,
-        CronTrigger(hour=16, minute=50),
+        CronTrigger(hour=17, minute=35),
         id="evening_reminders",
         replace_existing=True
     )
