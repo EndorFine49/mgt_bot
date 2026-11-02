@@ -1144,8 +1144,6 @@ async def show_shop_menu(tg_id: int, target):
         await edit_or_send_text(target, "Сначала выбери цвет своего стикмана!", reply_markup=get_main_keyboard(tg_id))
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="👓 Очки", callback_data="shop_cat_glasses"), 
-     InlineKeyboardButton(text="😃 Лицо", callback_data="shop_cat_face")],
     [InlineKeyboardButton(text="👗 Костюм", callback_data="shop_cat_costume")],
     [InlineKeyboardButton(text="🎩 Голова", callback_data="shop_cat_head"), 
      InlineKeyboardButton(text="👕 Верх", callback_data="shop_cat_top")],
