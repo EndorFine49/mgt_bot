@@ -1100,21 +1100,38 @@ async def process_hobbies(message: Message, state: FSMContext):
     await message.answer(text, reply_markup=get_main_keyboard(tg_id), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "check_survey")
-async def handle_survey_menu(message: Message):
-    user = get_user(message.from_user.id)
-    if not user: return await message.answer("Сначала /start", reply_markup=get_main_keyboard(message.from_user.id))
-
+async def handle_survey_menu(callback: CallbackQuery):
+    tg_id = callback.from_user.id
+    user = get_user(tg_id)
+    if not user:
+        return await callback.message.answer("Сначала /start", reply_markup=get_main_keyboard(tg_id))
+    
     if not user.get("survey_completed"):
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📝 Заполнить анкету (+5 вайбов)", callback_data="start_survey")]])
-        await message.answer("Ты ещё не заполнил анкету. Это займет пару минут, а взамен **5 вайбов**!", reply_markup=kb)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="📝 Заполнить анкету (+5 вайбов)", callback_data="start_survey")
+        ]])
+        await callback.message.answer(
+            "Ты ещё не заполнил анкету. Это займет пару минут, а взамен **5 вайбов**!",
+            reply_markup=kb,
+            parse_mode="Markdown"
+        )
     else:
-        text = (f"📋 **Твоя анкета:**\n\n👥 Команда: {user['team'] or 'Не указано'}\n🔥 Опыт: {user['experience'] or 'Не указано'}\n🎂 ДР: {user['birthday'] or 'Не указано'}\n📚 Группа: {user['study_group'] or 'Не указано'}\n🎨 Хобби: {user['hobbies'] or 'Не указано'}\n\nХочешь изменить?")
+        text = (f"📋 **Твоя анкета:**\n\n"
+                f"👥 Команда: {user['team'] or 'Не указано'}\n"
+                f"🔥 Опыт: {user['experience'] or 'Не указано'}\n"
+                f"🎂 ДР: {user['birthday'] or 'Не указано'}\n"
+                f"📚 Группа: {user['study_group'] or 'Не указано'}\n"
+                f"🎨 Хобби: {user['hobbies'] or 'Не указано'}\n\n"
+                f"Хочешь изменить?")
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ Команда", callback_data="edit_team"), InlineKeyboardButton(text="✏️ Опыт", callback_data="edit_shifts")],
-            [InlineKeyboardButton(text="✏️ ДР", callback_data="edit_birthday"), InlineKeyboardButton(text="✏️ Группа", callback_data="edit_study_group")],
+            [InlineKeyboardButton(text="✏️ Команда", callback_data="edit_team"),
+             InlineKeyboardButton(text="✏️ Опыт", callback_data="edit_shifts")],
+            [InlineKeyboardButton(text="✏️ ДР", callback_data="edit_birthday"),
+             InlineKeyboardButton(text="✏️ Группа", callback_data="edit_study_group")],
             [InlineKeyboardButton(text="✏️ Хобби", callback_data="edit_hobbies")]
         ])
-        await message.answer(text, reply_markup=kb, parse_mode="Markdown")
+        await callback.message.answer(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("edit_"))
 async def start_edit(callback: CallbackQuery, state: FSMContext):
