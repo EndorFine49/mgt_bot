@@ -1863,14 +1863,14 @@ async def main():
     # Напоминания в 10:00 МСК
     scheduler.add_job(
         send_daily_reminders,
-        CronTrigger(hour=10, minute=00, timezone=MOSCOW_TZ),
+        CronTrigger(hour=10, minute=00),
         id="daily_reminders",
         replace_existing=True
     )
 
     scheduler.add_job(
         send_evening_reminders,
-        CronTrigger(hour=17, minute=35),
+        CronTrigger(hour=14, minute=40),
         id="evening_reminders",
         replace_existing=True
     )
@@ -1878,7 +1878,7 @@ async def main():
     # Пометка неотчитанных целей в 10:00 МСК
     scheduler.add_job(
         mark_unreported_goals_as_failed,
-        CronTrigger(hour=10, minute=00, timezone=MOSCOW_TZ),
+        CronTrigger(hour=10, minute=00),
         id="mark_unreported_goals",
         replace_existing=True
     )
