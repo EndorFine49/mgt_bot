@@ -119,7 +119,7 @@ class ContestSubmit(StatesGroup):
     waiting_for_photo = State()
 
 class ContestReview(StatesGroup):
-    reviewing = State()  # Храним contest_id и индекс текущего ответа
+    reviewing = State() 
 
 # --- БАЗА ДАННЫХ ---
 def get_user(tg_id: int):
@@ -303,6 +303,25 @@ def get_user_submission(contest_id: int, user_tg_id: int):
 def get_pending_submissions(contest_id: int):
     response = supabase.table("contest_submissions").select("*").eq("contest_id", contest_id).eq("status", "pending").order("submitted_at").execute()
     return response.data if response.data else []
+
+def get_submissions_by_status(contest_id: int, status: str):
+    """Возвращает ответы с указанным статусом."""
+    response = supabase.table("contest_submissions").select("*").eq("contest_id", contest_id).eq("status", status).order("submitted_at").execute()
+    return response.data if response.data else []
+
+def get_submission(submission_id: int):
+    """Возвращает один ответ по ID."""
+    response = supabase.table("contest_submissions").select("*").eq("id", submission_id).execute()
+    return response.data[0] if response.data else None
+
+def count_submissions_by_status(contest_id: int):
+    """Возвращает количество ответов по каждому статусу."""
+    response = supabase.table("contest_submissions").select("status").eq("contest_id", contest_id).execute()
+    counts = {"pending": 0, "approved": 0, "rejected": 0}
+    if response.data:
+        for sub in response.data:
+            counts[sub['status']] = counts.get(sub['status'], 0) + 1
+    return counts
 
 def update_submission_status(submission_id: int, status: str):
     supabase.table("contest_submissions").update({"status": status}).eq("id", submission_id).execute()
@@ -1540,17 +1559,47 @@ async def contest_list_active(callback: CallbackQuery):
     
     kb = []
     for c in contests:
-        # Считаем количество ответов
-        pending = len(get_pending_submissions(c['id']))
+        counts = count_submissions_by_status(c['id'])
+        total = counts['pending'] + counts['approved'] + counts['rejected']
         kb.append([InlineKeyboardButton(
-            text=f"#{c['id']} | 📝 {c['text'][:25]}... | ⏳ {pending}",
-            callback_data=f"contest_review_{c['id']}"
+            text=f"#{c['id']} | 📝 {c['text'][:20]}... | 📊 {total}",
+            callback_data=f"contest_review_menu_{c['id']}"
         )])
     kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_contests_menu")])
     
     await callback.message.edit_text(
-        "📋 **Активные конкурсы**\n\nВыбери конкурс для проверки ответов:",
+        "📋 **Активные конкурсы**\n\nВыбери конкурс:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("contest_review_menu_"))
+async def contest_review_menu(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Нет доступа", show_alert=True)
+    
+    contest_id = int(callback.data.replace("contest_review_menu_", ""))
+    contest = get_contest(contest_id)
+    if not contest:
+        return await callback.answer("Конкурс не найден.", show_alert=True)
+    
+    counts = count_submissions_by_status(contest_id)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"⏳ На проверке ({counts['pending']})", callback_data=f"contest_review_{contest_id}_pending")],
+        [InlineKeyboardButton(text=f"✅ Одобренные ({counts['approved']})", callback_data=f"contest_review_{contest_id}_approved")],
+        [InlineKeyboardButton(text=f"❌ Отклонённые ({counts['rejected']})", callback_data=f"contest_review_{contest_id}_rejected")],
+        [InlineKeyboardButton(text="🏁 Завершить конкурс", callback_data=f"contest_finish_{contest_id}")],
+        [InlineKeyboardButton(text="⬅️ К списку", callback_data="contest_list_active")]
+    ])
+    
+    await callback.message.edit_text(
+        f"🏆 **Конкурс #{contest_id}**\n\n"
+        f"📝 {contest['text']}\n\n"
+        f"💰 Награда: {contest['reward']} {vibes_word(contest['reward'])}\n\n"
+        f"Выбери категорию для просмотра:",
+        reply_markup=kb,
         parse_mode="Markdown"
     )
     await callback.answer()
@@ -1560,38 +1609,43 @@ async def contest_review_start(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("Нет доступа", show_alert=True)
     
-    contest_id = int(callback.data.replace("contest_review_", ""))
+    # Формат: contest_review_{contest_id}_{status}
+    parts = callback.data.replace("contest_review_", "").split("_")
+    contest_id = int(parts[0])
+    status = parts[1] if len(parts) > 1 else "pending"
+    
     contest = get_contest(contest_id)
     if not contest:
         return await callback.answer("Конкурс не найден.", show_alert=True)
     
     # Сохраняем контекст проверки
-    await state.update_data(review_contest_id=contest_id, review_index=0)
+    await state.update_data(review_contest_id=contest_id, review_index=0, review_status=status)
     await state.set_state(ContestReview.reviewing)
     
-    await show_next_submission(callback.message, contest_id, 0)
+    await show_next_submission(callback.message, contest_id, 0, status)
     await callback.answer()
 
-async def show_next_submission(target, contest_id: int, index: int):
-    """Показывает следующий ответ на проверку."""
-    submissions = get_pending_submissions(contest_id)
+async def show_next_submission(target, contest_id: int, index: int, status: str = "pending"):
+    """Показывает следующий ответ на проверку с учётом статуса."""
+    submissions = get_submissions_by_status(contest_id, status)
     contest = get_contest(contest_id)
     
+    status_emoji = {"pending": "⏳", "approved": "✅", "rejected": "❌"}[status]
+    status_name = {"pending": "На проверке", "approved": "Одобренные", "rejected": "Отклонённые"}[status]
+    
+    # Кнопки возврата к меню конкурса
+    back_to_menu = [InlineKeyboardButton(text=f"📋 К меню конкурса ({status_emoji} {status_name})", callback_data=f"contest_review_menu_{contest_id}")]
+    
     if index >= len(submissions):
-        # Все ответы проверены
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🏁 Завершить конкурс", callback_data=f"contest_finish_{contest_id}")],
-            [InlineKeyboardButton(text="⬅️ К списку конкурсов", callback_data="contest_list_active")]
-        ])
+        kb = InlineKeyboardMarkup(inline_keyboard=[back_to_menu])
         
-        # Удаляем текущее сообщение (фото или текст) и отправляем новое
         try:
             await target.delete()
         except Exception:
             pass
         await target.answer(
-            f"✅ Все ответы по конкурсу #{contest_id} проверены!\n\n"
-            f"Можешь завершить конкурс или вернуться к списку.",
+            f"✅ В категории «{status_name}» больше нет ответов.\n\n"
+            f"Можешь вернуться к меню конкурса.",
             reply_markup=kb
         )
         return
@@ -1600,27 +1654,38 @@ async def show_next_submission(target, contest_id: int, index: int):
     user = get_user(sub['user_tg_id'])
     user_name = f"{user['first_name']} {user.get('last_name', '')}" if user else f"ID {sub['user_tg_id']}"
     
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Одобрить", callback_data=f"contest_approve_{sub['id']}"),
-         InlineKeyboardButton(text="❌ Отклонить", callback_data=f"contest_reject_{sub['id']}")],
-        [InlineKeyboardButton(text="⏭ Пропустить", callback_data=f"contest_skip_{index + 1}")],
-        [InlineKeyboardButton(text=f"📊 {index + 1}/{len(submissions)}", callback_data="noop"),
-         InlineKeyboardButton(text="⬅️ Выход", callback_data="contest_list_active")]
+    # Формируем кнопки в зависимости от текущего статуса
+    action_buttons = []
+    if status == "pending":
+        action_buttons = [
+            [InlineKeyboardButton(text="✅ Одобрить", callback_data=f"contest_approve_{sub['id']}"),
+             InlineKeyboardButton(text="❌ Отклонить", callback_data=f"contest_reject_{sub['id']}")]
+        ]
+    elif status == "approved":
+        action_buttons = [
+            [InlineKeyboardButton(text="❌ Отменить одобрение", callback_data=f"contest_reject_{sub['id']}")]
+        ]
+    elif status == "rejected":
+        action_buttons = [
+            [InlineKeyboardButton(text="✅ Одобрить", callback_data=f"contest_approve_{sub['id']}")]
+        ]
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=action_buttons + [
+        [InlineKeyboardButton(text=f"⏭ Следующий ({index + 1}/{len(submissions)})", callback_data=f"contest_skip_{index + 1}")],
+        back_to_menu
     ])
     
     caption = (
-        f"🏆 **Конкурс #{contest_id}**\n"
+        f"{status_emoji} **{status_name}** | Конкурс #{contest_id}\n"
         f"👤 Участник: {user_name}\n"
         f"📅 Отправлено: {format_moscow_time(sub['submitted_at'])}\n\n"
         f"💰 Награда: {contest['reward']} {vibes_word(contest['reward'])}"
     )
     
-    # Всегда удаляем текущее сообщение и отправляем новое фото
     try:
         await target.delete()
     except Exception:
-        pass  # Если не удалось удалить (например, первое сообщение), просто продолжаем
-    
+        pass
     await target.answer_photo(
         photo=sub['photo_file_id'],
         caption=caption,
@@ -1636,33 +1701,36 @@ async def contest_approve(callback: CallbackQuery, state: FSMContext):
     sub_id = int(callback.data.replace("contest_approve_", ""))
     data = await state.get_data()
     contest_id = data['review_contest_id']
-    
-    # Получаем submission
-    sub = supabase.table("contest_submissions").select("*").eq("id", sub_id).execute().data[0]
     contest = get_contest(contest_id)
+    
+    sub = get_submission(sub_id)
+    old_status = sub['status']
     
     # Обновляем статус
     update_submission_status(sub_id, "approved")
     
-    # Начисляем награду
-    new_balance, team_name = add_vibes(sub['user_tg_id'], contest['reward'])
+    # Начисляем награду ТОЛЬКО если раньше не был approved
+    reward_msg = ""
+    if old_status != "approved":
+        new_balance, team_name = add_vibes(sub['user_tg_id'], contest['reward'])
+        reward_msg = f" (+{contest['reward']} {vibes_word(contest['reward'])})"
+        
+        # Уведомляем пользователя (только если это первое одобрение)
+        if old_status == "pending":
+            try:
+                await bot.send_message(
+                    sub['user_tg_id'],
+                    f"🎉 **Поздравляем!**\n\n"
+                    f"Твой ответ на конкурс принят!\n"
+                    f"Тебе начислено **{contest['reward']} {vibes_word(contest['reward'])}**.\n\n"
+                    f"💰 Твой новый баланс: {new_balance} {vibes_word(new_balance)}",
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить пользователя {sub['user_tg_id']}: {e}")
     
-    # Уведомляем пользователя
-    try:
-        await bot.send_message(
-            sub['user_tg_id'],
-            f"🎉 **Поздравляем!**\n\n"
-            f"Твой ответ на конкурс принят!\n"
-            f"Тебе начислено **{contest['reward']} {vibes_word(contest['reward'])}**.\n\n"
-            f"💰 Твой новый баланс: {new_balance} {vibes_word(new_balance)}",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        logger.error(f"Не удалось уведомить пользователя {sub['user_tg_id']}: {e}")
-    
-    # Показываем следующий ответ
-    await show_next_submission(callback.message, contest_id, data['review_index'])
-    await callback.answer(f"✅ Одобрено! +{contest['reward']} вайбов")
+    await show_next_submission(callback.message, contest_id, data['review_index'], data['review_status'])
+    await callback.answer(f"✅ Одобрено{reward_msg}")
 
 @dp.callback_query(ContestReview.reviewing, F.data.startswith("contest_reject_"))
 async def contest_reject(callback: CallbackQuery, state: FSMContext):
@@ -1672,23 +1740,42 @@ async def contest_reject(callback: CallbackQuery, state: FSMContext):
     sub_id = int(callback.data.replace("contest_reject_", ""))
     data = await state.get_data()
     contest_id = data['review_contest_id']
+    contest = get_contest(contest_id)
     
-    # Получаем submission для уведомления
-    sub = supabase.table("contest_submissions").select("*").eq("id", sub_id).execute().data[0]
+    sub = get_submission(sub_id)
+    old_status = sub['status']
     
+    # Обновляем статус
     update_submission_status(sub_id, "rejected")
     
-    # Уведомляем пользователя
-    try:
-        await bot.send_message(
-            sub['user_tg_id'],
-            "К сожалению, твой ответ на конкурс не принят. Но ты можешь участвовать в следующих!"
-        )
-    except Exception as e:
-        logger.error(f"Не удалось уведомить пользователя {sub['user_tg_id']}: {e}")
+    # Если раньше был approved — нужно отозвать вайбы
+    revoke_msg = ""
+    if old_status == "approved":
+        new_balance, _ = add_vibes(sub['user_tg_id'], -contest['reward'])
+        revoke_msg = f" (-{contest['reward']} {vibes_word(contest['reward'])})"
+        
+        try:
+            await bot.send_message(
+                sub['user_tg_id'],
+                f"⚠️ **Важно**\n\n"
+                f"К сожалению, твой ответ на конкурс был пересмотрен и отклонён.\n"
+                f"С баланса списано {contest['reward']} {vibes_word(contest['reward'])}.\n\n"
+                f"💰 Твой новый баланс: {new_balance} {vibes_word(new_balance)}"
+            )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить пользователя {sub['user_tg_id']}: {e}")
+    elif old_status == "pending":
+        # Уведомляем об отклонении (только если это первое отклонение)
+        try:
+            await bot.send_message(
+                sub['user_tg_id'],
+                "К сожалению, твой ответ на конкурс не принят. Но ты можешь участвовать в следующих!"
+            )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить пользователя {sub['user_tg_id']}: {e}")
     
-    await show_next_submission(callback.message, contest_id, data['review_index'])
-    await callback.answer("❌ Отклонено")
+    await show_next_submission(callback.message, contest_id, data['review_index'], data['review_status'])
+    await callback.answer(f"❌ Отклонено{revoke_msg}")
 
 @dp.callback_query(ContestReview.reviewing, F.data.startswith("contest_skip_"))
 async def contest_skip(callback: CallbackQuery, state: FSMContext):
@@ -1699,7 +1786,7 @@ async def contest_skip(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await state.update_data(review_index=new_index)
     
-    await show_next_submission(callback.message, data['review_contest_id'], new_index)
+    await show_next_submission(callback.message, data['review_contest_id'], new_index, data['review_status'])
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("contest_finish_"))
