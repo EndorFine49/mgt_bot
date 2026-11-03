@@ -47,6 +47,19 @@ def vibes_word(count):
     if n1 == 1: return "вайб"
     return "вайбов"
 
+def format_moscow_time(iso_str):
+    """Конвертирует ISO-время из БД в московский формат ДД.ММ.ГГГГ ЧЧ:ММ."""
+    if not iso_str:
+        return "—"
+    try:
+        # Парсим ISO-строку (поддерживает +00:00 и Z)
+        dt = datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
+        # Конвертируем в московское время
+        moscow_dt = dt.astimezone(MOSCOW_TZ)
+        return moscow_dt.strftime('%d.%m.%Y %H:%M')
+    except Exception:
+        return iso_str[:16] if len(iso_str) >= 16 else iso_str
+
 # --- КЛАВИАТУРЫ ---
 def get_main_keyboard(tg_id: int) -> ReplyKeyboardMarkup:
     """Возвращает главное меню с учетом прав пользователя."""
@@ -441,7 +454,7 @@ async def handle_profile(message: Message):
         return await message.answer("Сначала зарегистрируйся через /start", reply_markup=get_main_keyboard(tg_id))
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Баланс", callback_data="profile_balance"),
-         InlineKeyboardButton(text="🐾 Мой питомец", callback_data="profile_pet")],
+         InlineKeyboardButton(text="🐾 Мой стикман", callback_data="profile_pet")],
          [InlineKeyboardButton(text="📝 Анкета", callback_data="check_survey")],
         [InlineKeyboardButton(text="🏆 Рейтинг пользователей", callback_data="profile_rating")]
     ])
@@ -524,7 +537,7 @@ async def profile_pet(callback: CallbackQuery):
 async def profile_back(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Баланс", callback_data="profile_balance"),
-         InlineKeyboardButton(text="🐾 Мой питомец", callback_data="profile_pet")],
+         InlineKeyboardButton(text="🐾 Мой стикман", callback_data="profile_pet")],
         [InlineKeyboardButton(text="🏆 Рейтинг пользователей", callback_data="profile_rating")]
     ])
     await callback.message.edit_text(
@@ -538,7 +551,7 @@ async def profile_back(callback: CallbackQuery):
 async def profile_back(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Баланс", callback_data="profile_balance"),
-         InlineKeyboardButton(text="🐾 Мой питомец", callback_data="profile_pet")]
+         InlineKeyboardButton(text="🐾 Мой стикман", callback_data="profile_pet")]
     ])
     await callback.message.delete()
     await callback.message.answer(
@@ -1570,17 +1583,17 @@ async def show_next_submission(target, contest_id: int, index: int):
             [InlineKeyboardButton(text="🏁 Завершить конкурс", callback_data=f"contest_finish_{contest_id}")],
             [InlineKeyboardButton(text="⬅️ К списку конкурсов", callback_data="contest_list_active")]
         ])
-        if isinstance(target, Message):
-            await target.answer(
-                f"✅ Все ответы по конкурсу #{contest_id} проверены!\n\n"
-                f"Можешь завершить конкурс или вернуться к списку.",
-                reply_markup=kb
-            )
-        else:
-            await target.edit_text(
-                f"✅ Все ответы по конкурсу #{contest_id} проверены!",
-                reply_markup=kb
-            )
+        
+        # Удаляем текущее сообщение (фото или текст) и отправляем новое
+        try:
+            await target.delete()
+        except Exception:
+            pass
+        await target.answer(
+            f"✅ Все ответы по конкурсу #{contest_id} проверены!\n\n"
+            f"Можешь завершить конкурс или вернуться к списку.",
+            reply_markup=kb
+        )
         return
     
     sub = submissions[index]
@@ -1598,32 +1611,22 @@ async def show_next_submission(target, contest_id: int, index: int):
     caption = (
         f"🏆 **Конкурс #{contest_id}**\n"
         f"👤 Участник: {user_name}\n"
-        f"📅 Отправлено: {sub['submitted_at'][:16]}\n\n"
+        f"📅 Отправлено: {format_moscow_time(sub['submitted_at'])}\n\n"
         f"💰 Награда: {contest['reward']} {vibes_word(contest['reward'])}"
     )
     
-    # Отправляем фото с подписью
-    if isinstance(target, Message):
-        # Если target - это Message (при первом входе), нужно либо edit, либо send
-        if target.photo:
-            await target.edit_caption(caption=caption, reply_markup=kb, parse_mode="Markdown")
-        else:
-            await target.delete()
-            await target.answer_photo(
-                photo=sub['photo_file_id'],
-                caption=caption,
-                reply_markup=kb,
-                parse_mode="Markdown"
-            )
-    else:
-        await target.edit_text("⏳ Загружаю фото...")
+    # Всегда удаляем текущее сообщение и отправляем новое фото
+    try:
         await target.delete()
-        await target.answer_photo(
-            photo=sub['photo_file_id'],
-            caption=caption,
-            reply_markup=kb,
-            parse_mode="Markdown"
-        )
+    except Exception:
+        pass  # Если не удалось удалить (например, первое сообщение), просто продолжаем
+    
+    await target.answer_photo(
+        photo=sub['photo_file_id'],
+        caption=caption,
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
 
 @dp.callback_query(ContestReview.reviewing, F.data.startswith("contest_approve_"))
 async def contest_approve(callback: CallbackQuery, state: FSMContext):
@@ -1863,14 +1866,14 @@ async def main():
     # Напоминания в 10:00 МСК
     scheduler.add_job(
         send_daily_reminders,
-        CronTrigger(hour=10, minute=00),
+        CronTrigger(hour=7, minute=00),
         id="daily_reminders",
         replace_existing=True
     )
 
     scheduler.add_job(
         send_evening_reminders,
-        CronTrigger(hour=20, minute=00),
+        CronTrigger(hour=17, minute=00),
         id="evening_reminders",
         replace_existing=True
     )
@@ -1878,7 +1881,7 @@ async def main():
     # Пометка неотчитанных целей в 10:00 МСК
     scheduler.add_job(
         mark_unreported_goals_as_failed,
-        CronTrigger(hour=10, minute=00),
+        CronTrigger(hour=7, minute=00),
         id="mark_unreported_goals",
         replace_existing=True
     )
