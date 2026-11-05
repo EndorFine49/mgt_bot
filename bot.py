@@ -280,6 +280,17 @@ def get_active_contests():
     response = supabase.table("contests").select("*").eq("status", "active").order("created_at", desc=True).execute()
     return response.data if response.data else []
 
+def get_active_contests_with_user_status(tg_id: int):
+    contests = get_active_contests()
+    result = []
+    for c in contests:
+        sub = get_user_submission(c['id'], tg_id)
+        result.append({
+            'contest': c,
+            'submission': sub  # None если не участвовал
+        })
+    return result
+
 def get_contest(contest_id: int):
     response = supabase.table("contests").select("*").eq("id", contest_id).execute()
     return response.data[0] if response.data else None
@@ -643,6 +654,36 @@ async def build_tasks_view(tg_id: int):
         text += "Ты ещё не поставил цель на сегодня!\n\n"
         text += "Поставь цель сейчас и отчитайся о её выполнении после 20:00."
         kb.append([InlineKeyboardButton(text="🎯 Поставить цель", callback_data="goal_set")])
+    
+    active_contests = get_active_contests_with_user_status(tg_id)
+    if active_contests:
+        text += "\n\n🏆 **Активные конкурсы:**\n"
+        for item in active_contests:
+            c = item['contest']
+            sub = item['submission']
+
+            short_text = c['text'][:40] + "..." if len(c['text']) > 40 else c['text']
+            
+            if not sub:
+                text += f"\n• {short_text}\n  💰 {c['reward']} {vibes_word(c['reward'])}\n"
+                kb.append([InlineKeyboardButton(
+                    text=f"✅ Участвовать в #{c['id']}",
+                    callback_data=f"contest_join_{c['id']}"
+                )])
+            elif sub['status'] == 'pending':
+                text += f"\n• {short_text}\n  ⏳ На проверке\n"
+                kb.append([InlineKeyboardButton(
+                    text=f"🔄 Заменить фото в #{c['id']}",
+                    callback_data=f"contest_resubmit_{c['id']}"
+                )])
+            elif sub['status'] == 'approved':
+                text += f"\n• {short_text}\n  ✅ Награда получена (+{c['reward']})\n"
+            elif sub['status'] == 'rejected':
+                text += f"\n• {short_text}\n  ❌ Отклонено\n"
+                kb.append([InlineKeyboardButton(
+                    text=f"🔄 Заменить фото в #{c['id']}",
+                    callback_data=f"contest_resubmit_{c['id']}"
+                )])
     
     text += "\n\n"
     # kb.append([InlineKeyboardButton(text="✨ Получить вайб", callback_data="claim_vibe_inline")])
@@ -1209,6 +1250,37 @@ async def save_edit_hobbies(message: Message, state: FSMContext):
     await message.answer("✅ Хобби обновлены!", reply_markup=get_main_keyboard(message.from_user.id))
 
 # --- ОБРАБОТЧИКИ: МАГАЗИН ---
+async def safe_edit_or_send(target, text: str, reply_markup=None, parse_mode=None):
+    """
+    Универсальная функция:
+    - Если сообщение — фото → удалить и отправить новое
+    - Если сообщение — текст от бота → edit_text
+    - Если сообщение — от пользователя → answer
+    """
+    is_bot_message = getattr(target, 'from_user', None) and getattr(target.from_user, 'is_bot', False)
+    is_photo = bool(getattr(target, 'photo', None))
+    
+    if is_photo:
+        # Фото нельзя редактировать как текст — удаляем и отправляем новое
+        try:
+            await target.delete()
+        except Exception:
+            pass
+        await target.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    elif not is_bot_message:
+        # Сообщение от пользователя — отправляем новое
+        await target.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    else:
+        # Текстовое сообщение от бота — пробуем редактировать
+        try:
+            await target.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except TelegramBadRequest:
+            try:
+                await target.delete()
+            except Exception:
+                pass
+            await target.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+
 async def edit_or_send_text(target, text: str, reply_markup=None, parse_mode=None):
     is_bot_message = getattr(target, 'from_user', None) and getattr(target.from_user, 'is_bot', False)
     
@@ -1555,7 +1627,8 @@ async def contest_list_active(callback: CallbackQuery):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_contests_menu")]
         ])
-        return await callback.message.edit_text("Нет активных конкурсов.", reply_markup=kb)
+        await safe_edit_or_send(callback.message, "Нет активных конкурсов.", reply_markup=kb)
+        return await callback.answer()
     
     kb = []
     for c in contests:
@@ -1567,7 +1640,8 @@ async def contest_list_active(callback: CallbackQuery):
         )])
     kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_contests_menu")])
     
-    await callback.message.edit_text(
+    await safe_edit_or_send(
+        callback.message,
         "📋 **Активные конкурсы**\n\nВыбери конкурс:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
         parse_mode="Markdown"
@@ -1594,7 +1668,8 @@ async def contest_review_menu(callback: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ К списку", callback_data="contest_list_active")]
     ])
     
-    await callback.message.edit_text(
+    await safe_edit_or_send(
+        callback.message,
         f"🏆 **Конкурс #{contest_id}**\n\n"
         f"📝 {contest['text']}\n\n"
         f"💰 Награда: {contest['reward']} {vibes_word(contest['reward'])}\n\n"
@@ -1629,21 +1704,15 @@ async def show_next_submission(target, contest_id: int, index: int, status: str 
     """Показывает следующий ответ на проверку с учётом статуса."""
     submissions = get_submissions_by_status(contest_id, status)
     contest = get_contest(contest_id)
-    
     status_emoji = {"pending": "⏳", "approved": "✅", "rejected": "❌"}[status]
     status_name = {"pending": "На проверке", "approved": "Одобренные", "rejected": "Отклонённые"}[status]
-    
-    # Кнопки возврата к меню конкурса
     back_to_menu = [InlineKeyboardButton(text=f"📋 К меню конкурса ({status_emoji} {status_name})", callback_data=f"contest_review_menu_{contest_id}")]
     
     if index >= len(submissions):
         kb = InlineKeyboardMarkup(inline_keyboard=[back_to_menu])
-        
-        try:
-            await target.delete()
-        except Exception:
-            pass
-        await target.answer(
+        # ✅ Используем safe_edit_or_send
+        await safe_edit_or_send(
+            target,
             f"✅ В категории «{status_name}» больше нет ответов.\n\n"
             f"Можешь вернуться к меню конкурса.",
             reply_markup=kb
@@ -1654,7 +1723,6 @@ async def show_next_submission(target, contest_id: int, index: int, status: str 
     user = get_user(sub['user_tg_id'])
     user_name = f"{user['first_name']} {user.get('last_name', '')}" if user else f"ID {sub['user_tg_id']}"
     
-    # Формируем кнопки в зависимости от текущего статуса
     action_buttons = []
     if status == "pending":
         action_buttons = [
@@ -1801,7 +1869,11 @@ async def contest_finish(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ К конкурсам", callback_data="admin_contests_menu")]
     ])
-    await callback.message.edit_text(f"🏁 Конкурс #{contest_id} завершён!", reply_markup=kb)
+    await safe_edit_or_send(
+        callback.message,
+        f"🏁 Конкурс #{contest_id} завершён!",
+        reply_markup=kb
+    )
     await callback.answer()
 
 # --- ОБРАБОТЧИКИ: КОНКУРСЫ (ПОЛЬЗОВАТЕЛЬ) ---
@@ -1834,10 +1906,39 @@ async def contest_join(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+@dp.callback_query(F.data.startswith("contest_resubmit_"))
+async def contest_resubmit(callback: CallbackQuery, state: FSMContext):
+    contest_id = int(callback.data.replace("contest_resubmit_", ""))
+    contest = get_contest(contest_id)
+    
+    if not contest or contest['status'] != 'active':
+        return await callback.answer("Этот конкурс уже завершён.", show_alert=True)
+    
+    # Проверяем, что пользователь уже отправлял
+    existing = get_user_submission(contest_id, callback.from_user.id)
+    if not existing:
+        return await callback.answer("Ты ещё не участвовал в этом конкурсе.", show_alert=True)
+    
+    if existing['status'] == 'approved':
+        return await callback.answer("Твой ответ уже принят, награда начислена! 🎉", show_alert=True)
+    
+    # Переводим в состояние ожидания фото
+    await state.update_data(contest_id=contest_id, is_resubmit=True)
+    await state.set_state(ContestSubmit.waiting_for_photo)
+    
+    await callback.message.edit_text(
+        f"📸 Отправь новый фото-ответ на конкурс.\n\n"
+        f"Старое фото будет заменено.\n\n"
+        f"💰 Награда: {contest['reward']} {vibes_word(contest['reward'])}\n\n"
+        f"Отмена — /cancel"
+    )
+    await callback.answer()
+
 @dp.message(ContestSubmit.waiting_for_photo)
 async def contest_submit_photo(message: Message, state: FSMContext):
     data = await state.get_data()
     contest_id = data.get('contest_id')
+    is_resubmit = data.get('is_resubmit', False)
     
     if not contest_id:
         await state.clear()
@@ -1855,21 +1956,34 @@ async def contest_submit_photo(message: Message, state: FSMContext):
     # Берём фото максимального размера
     photo = message.photo[-1]
     
-    # Сохраняем в БД
-    try:
-        save_submission(contest_id, message.from_user.id, photo.file_id)
-    except Exception as e:
-        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+    if is_resubmit:
+        # Обновляем существующую запись
+        try:
+            supabase.table("contest_submissions").update({
+                "photo_file_id": photo.file_id,
+                "status": "pending",
+                "submitted_at": datetime.now().isoformat()
+            }).eq("contest_id", contest_id).eq("user_tg_id", message.from_user.id).execute()
+        except Exception as e:
+            logger.error(f"Ошибка обновления фото конкурса: {e}")
             await state.clear()
-            return await message.answer(
-                "Ты уже отправлял ответ на этот конкурс!",
-                reply_markup=get_main_keyboard(message.from_user.id)
-            )
-        raise
+            return await message.answer("Ошибка при замене фото. Попробуй позже.", reply_markup=get_main_keyboard(message.from_user.id))
+    else:
+        # Сохраняем новую запись
+        try:
+            save_submission(contest_id, message.from_user.id, photo.file_id)
+        except Exception as e:
+            if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+                await state.clear()
+                return await message.answer(
+                    "Ты уже отправлял ответ на этот конкурс!",
+                    reply_markup=get_main_keyboard(message.from_user.id)
+                )
+            raise
     
     await state.clear()
     await message.answer(
-        f"✅ Твой ответ принят!\n\n"
+        f"✅ {'Фото заменено' if is_resubmit else 'Твой ответ принят'}!\n\n"
         f"Ждём решения администратора. Если ответ будет одобрен — "
         f"ты получишь **{contest['reward']} {vibes_word(contest['reward'])}** на баланс!",
         reply_markup=get_main_keyboard(message.from_user.id),
